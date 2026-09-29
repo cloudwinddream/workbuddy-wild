@@ -33,7 +33,7 @@ import (
 // Version 面板展示的版本号。
 // 统一入口：打包时用 -ldflags "-X github.com/rockswang/workbuddy-wild/internal/app.Version=vX.Y.Z" 注入，
 // 与 wails.json 的 productVersion、README 保持一致（升级时三处同步）。
-var Version = "0.5.7"
+var Version = "0.5.8"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -143,6 +143,16 @@ func (a *App) totalAccounts() int {
 		}
 	}
 	return n
+}
+
+// ListenAddr 返回对外展示的本机可达 API 地址（通配监听时归一化为 127.0.0.1）。
+// 供托盘/弹窗等"服务仍在运行"的提示复用，避免各处重复拼装 host。
+func (a *App) ListenAddr() string {
+	host := a.cfg.Listen.Host
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("%s:%d", host, a.cfg.Listen.Port)
 }
 
 func (a *App) allStatuses() []pool.Status {

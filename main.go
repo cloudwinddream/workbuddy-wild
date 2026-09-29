@@ -8,6 +8,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -42,6 +43,25 @@ func main() {
 	// 工作目录固定为 exe 所在目录，保证相对路径配置（./auths ./data）稳定
 	if exe, err := os.Executable(); err == nil {
 		_ = os.Chdir(filepath.Dir(exe))
+	}
+
+	// ⚠️ 启动自检：确认本 exe 在磁盘上真的可读。
+	//
+	// 背景（v0.5.7 线上事故）：更新程序下载新版 exe 覆盖运行时，目标文件会被
+	// 拒绝写入或被截断/部分写入。此时磁盘上留下一个**损坏或半截的 exe**：
+	//   - 已运行的旧进程不受影响（它已映射到内存）
+	//   - 系统仍允许"启动"它（PE 头可能完好），于是日志里能看到"已启动"
+	//   - 但后续一切 GUI 初始化全部失败，窗口/托盘都不出现，且**几乎没有日志**
+	// 表现为「窗口弹不出来」，且极难从日志定位。
+	//
+	// 本自检在"已启动"日志前后都不依赖，能第一时间给出可操作的错误提示。
+	if err := verifySelfReadable(); err != nil {
+		msg := "程序文件可能已损坏或不完整（常见于更新过程中被中断）。\n\n" +
+			"错误：" + err.Error() + "\n\n" +
+			"请重新下载完整版本，并确保更新时先退出旧版本再替换文件。"
+		log.Printf("启动自检失败: %v", err)
+		winutil.MessageBox(msg)
+		os.Exit(1)
 	}
 
 	// 进程级单实例锁：必须在 HTTP 服务/调度器/WebView2 之前检查。
@@ -186,6 +206,40 @@ func mustExecutable() string {
 	return os.Args[0]
 }
 
+// verifySelfReadable 校验本 exe 在磁盘上可完整读取（防"半截更新文件"）。
+//
+// 判据（任一不满足即判定损坏）：
+//   - 文件存在且可打开
+//   - 大小 ≥ 1 MiB（本程序 12MB+，远大于此；截断文件会明显偏小）
+//   - 头部是合法 PE（"MZ"）
+//
+// 这是对 v0.5.7「窗口弹不出来」事故的直接防护：更新中断会留下损坏文件，
+// 它能让进程"启动"却在 GUI 初始化阶段静默失败，日志几乎为空。
+func verifySelfReadable() error {
+	exe := mustExecutable()
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return fmt.Errorf("无法读取程序文件 %s: %w", filepath.Base(exe), err)
+	}
+	const minSize = 1 << 20 // 1 MiB
+	if fi.Size() < minSize {
+		return fmt.Errorf("程序文件仅 %d 字节（预期 ≥1MiB），疑似不完整", fi.Size())
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return fmt.Errorf("无法打开程序文件: %w", err)
+	}
+	defer f.Close()
+	var magic [2]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return fmt.Errorf("读取程序头部失败: %w", err)
+	}
+	if magic[0] != 'M' || magic[1] != 'Z' {
+		return fmt.Errorf("程序头部非法（%q，非 PE 可执行文件）", string(magic[:]))
+	}
+	return nil
+}
+
 // fatal 记录日志并弹出 MessageBox 后退出（GUI 无控制台，错误必须可见）。
 func fatal(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
@@ -245,11 +299,32 @@ func runGUI(a *app.App, webviewPath string) {
 // 右键与单击一致直接弹面板。关闭程序请在面板右上角 ✕ 或底部“退出”（带确认）。
 // 回调全部 go 化：托盘消息循环线程只做投递，绝不执行重量级逻辑。
 func runTray(a *app.App) {
+	started := make(chan struct{})
 	systray.Run(func() {
 		systray.SetIcon(trayIconICO)
 		systray.SetTooltip("WorkBuddy-Wild — 托盘管理面板")
 		systray.SetOnClick(func(systray.IMenu) { go a.ShowPanel() })
 		systray.SetOnDClick(func(systray.IMenu) { go a.ShowPanel() })
 		systray.SetOnRClick(func(systray.IMenu) { go a.ShowPanel() })
+		close(started)
 	}, func() {})
+	// ⚠️ 托盘是打开面板的**唯一入口**。若 systray 初始化失败，onReady 永不执行、
+	// 图标永不出现、窗口也永远弹不出来 —— 而日志此前一片空白，用户只能看到
+	// "程序好像启动了但没反应"。
+	//
+	// 注意：systray.Run 在正常退出时也会返回，因此这里只报告"从未完成初始化"
+	// 这一种情况（started 未关闭），避免关闭程序时误报。
+	select {
+	case <-started:
+		// 正常情况下走到这里说明 systray 已退出（进程正在关闭），无需提示
+	default:
+		log.Printf("托盘初始化失败：systray 在显示图标前退出，面板入口不可用")
+		winutil.InfoBox("托盘图标未能显示",
+			"系统托盘初始化失败，点击托盘打开面板的入口不可用。\n\n"+
+				"HTTP 服务与自动签到仍在正常运行。\n\n"+
+				"可尝试：\n"+
+				"1) 重启程序\n"+
+				"2) 检查是否有安全软件拦截了托盘操作\n\n"+
+				"API 地址：http://"+a.ListenAddr())
+	}
 }
