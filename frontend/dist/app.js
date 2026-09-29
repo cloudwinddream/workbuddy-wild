@@ -422,10 +422,20 @@ function bind() {
     $("btnCheckinAll").disabled = true;
     try {
       const res = await Go.CheckinAll();
-      const ok = res.filter((r) => r.ok).length;
+      // 三分类统计：真正新签到成功 / 今日已签（无新增积分）/ 失败。
+      // 把"今日已签"混进"成功"会让用户以为积分涨了却没涨。
+      const done = res.filter((r) => r.ok && r.already_checked).length;
+      const ok = res.filter((r) => r.ok && !r.already_checked).length;
       const failed = res.filter((r) => !r.ok);
-      const detail = failed.length ? `；失败：${failed.map((r) => `${r.uid}: ${r.msg || "未知错误"}`).join("；")}` : "";
-      toast(`签到完成：成功 ${ok}/${res.length}${detail}`);
+      const parts = [`本次签到成功 ${ok}`];
+      if (done) parts.push(`今日已签 ${done}（无新增积分）`);
+      if (failed.length) {
+        parts.push(
+          `失败 ${failed.length}：` +
+            failed.map((r) => `${r.uid}: ${r.msg || "未知错误"}`).join("；")
+        );
+      }
+      toast(`共 ${res.length} 个账号 — ${parts.join("，")}`);
     } catch (e) { toast("签到失败：" + e); }
     finally { $("btnCheckinAll").disabled = false; }
   };
@@ -464,10 +474,16 @@ function bind() {
     const label = accountLabel(uid);
     try {
       const res = await Go.CheckinAccount(uid);
-      if (res && res.ok) {
+      if (res && res.ok && res.already_checked) {
+        // 今日已签到：本次没有新增积分，绝不能显示成"签到成功"——
+        // 用户会期待积分上涨，发现没涨就会以为程序坏了。
+        toast(
+          `${label} 今日已签到，本次无新增积分` +
+            (res.has_remain ? `（当前剩余 ${res.remain}）` : "")
+        );
+      } else if (res && res.ok) {
         toast(`${label} 签到成功` + (res.has_remain ? `，剩余 ${res.remain}` : ""));
       } else if (res && res.retryable) {
-        // 上游高峰限流：不是失败，已安排自动重试
         toast(`${label} 上游繁忙，已安排自动重试`);
       } else {
         toast(`${label} 签到失败：${(res && res.msg) || "未知错误"}`);

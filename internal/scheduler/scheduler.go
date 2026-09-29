@@ -370,11 +370,15 @@ type CheckinResult struct {
 	UID string `json:"uid"`
 	OK  bool   `json:"ok"`
 	Msg string `json:"msg"`
-	// Retryable 表示失败原因是上游瞬时状态（如高峰限流），
-	// 不是账号本身的问题——不应触发冷却/禁用，稍后重试即可。
-	Retryable bool  `json:"retryable,omitempty"`
-	Remain    int64 `json:"remain"`
-	HasRemain bool  `json:"has_remain"`
+	// Retryable 表示失败原因是上游瞬时状态，不是账号本身的问题。
+	Retryable bool `json:"retryable,omitempty"`
+	// AlreadyChecked 表示**今天已经签过了**，本次没有新增积分。
+	//
+	// 这是"幂等的成功"，不是"本次签到成功"。前端必须据此区分文案：
+	// 若显示成绿色的"签到成功"，用户会期待积分上涨，发现没涨就会以为程序坏了。
+	AlreadyChecked bool  `json:"already_checked,omitempty"`
+	Remain         int64 `json:"remain"`
+	HasRemain      bool  `json:"has_remain"`
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
@@ -440,21 +444,20 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		log.Printf("checkin failed platform=%s uid=%s err=%v", name, uid, checkinErr)
 		r.Msg = shortErr(checkinErr)
 		if isAlready(checkinErr) {
-			r.OK = true // 已签到时视为成功状态
-			r.Msg = "已签到"
+			// 今天已经签过了：这是**正常状态**，不是本次领到了额度。
+			//
+			// 文案必须说清"本次没有新增积分"，否则用户看到绿色的"签到成功"
+			// 却发现积分没涨，会以为程序坏了（真实反馈过这一点）。
+			// 积分今天已在早先那次签到时入账，重复签到上游返回 9095。
+			r.OK = true
+			r.AlreadyChecked = true
+			r.Msg = "今日已签到（积分已在早先签到到账）"
 		} else if isRateLimited(checkinErr) {
-			// 上游高峰限流（如 TraeWork 9074）：瞬时状态，不是账号问题。
-			// 不触发冷却/禁用。此处**安排一次延迟重试**——原实现只打标记无人消费，
-			// 导致"稍后自动重试"实际要等到下一个定时点（可能间隔数小时）。
-			r.Retryable = true
-			r.Msg = "上游繁忙，稍后自动重试"
-			log.Printf("checkin rate-limited platform=%s uid=%s（可重试，不视为账号异常）", name, uid)
-			if at, ok := s.markRetryable(uid, time.Now()); ok {
-				log.Printf("checkin retry scheduled platform=%s uid=%s at=%s",
-					name, uid, at.Format("15:04:05"))
-			} else {
-				log.Printf("checkin retry exhausted-for-today platform=%s uid=%s", name, uid)
-			}
+			// 上游 9074：设备号未被认作已注册设备。**不是限流**，
+			// 重试永远不会成功（v0.5.7 已实测确认），因此不安排重试，
+			// 而是给出可操作的提示。
+			r.Msg = "签到被拒：设备号未注册，请重新添加该账号"
+			log.Printf("checkin device-rejected platform=%s uid=%s（需换真实设备号，重试无效）", name, uid)
 		}
 	} else {
 		r.OK = true
