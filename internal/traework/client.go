@@ -3,9 +3,11 @@ package traework
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -45,20 +47,57 @@ func Classify(status int, body string) provider.ErrKind {
 	return provider.ErrNone
 }
 
+// CheckinRateLimitCode TraeWork 签到限流业务码（"当前参与用户太多，请稍后再试"）。
+const CheckinRateLimitCode = 9074
+
+// ErrCheckinRateLimited 签到在耗尽重试后仍被限流。
+// 这是一个**可重试**的瞬时错误，不是永久失败——调用方（调度器）应安排稍后重试，
+// 而不是把它当作账号异常（不应触发冷却或禁用）。
+type ErrCheckinRateLimited struct {
+	Attempts int
+	Msg      string
+}
+
+func (e *ErrCheckinRateLimited) Error() string {
+	return fmt.Sprintf("checkin rate limited after %d attempts: %s", e.Attempts, e.Msg)
+}
+
+// IsRateLimited 实现 scheduler 的 rateLimited 接口：标记为瞬时、可重试。
+func (e *ErrCheckinRateLimited) IsRateLimited() bool { return true }
+
+// IsCheckinRateLimited 报告错误是否为签到限流（可重试）。
+func IsCheckinRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	var target *ErrCheckinRateLimited
+	return errors.As(err, &target)
+}
+
 // Client Trae SOLO 上游 HTTP 客户端。
 type Client struct {
-	HTTP              *http.Client
-	StreamHTTP        *http.Client
-	AgentHost         string
-	UgHost            string
-	OAuthHost         string
-	ClientID          string
-	CheckinRetryDelay time.Duration // 9074 限流后的重试等待；生产默认 8s
+	HTTP          *http.Client
+	StreamHTTP    *http.Client
+	AgentHost     string
+	UgHost        string
+	OAuthHost     string
+	ClientID      string
+	CheckinRetry  time.Duration // 首次 9074 限流的等待基数；生产默认 8s
+	CheckinMaxTry int           // 9074 限流的最大尝试次数；默认 4
 }
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
-	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second}
+	return &Client{
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		StreamHTTP:    &http.Client{Transport: tr},
+		AgentHost:     AgentHost,
+		UgHost:        UgHost,
+		OAuthHost:     OAuthHost,
+		ClientID:      ClientID,
+		CheckinRetry:  8 * time.Second,
+		CheckinMaxTry: 4,
+	}
 }
 
 func (c *Client) agentBase() string { return c.AgentHost }
@@ -256,9 +295,27 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 	return resp.CheckedIn, resp.Credits, resp.Enable, nil
 }
 
+// CheckinClaim 领取签到额度。
+//
+// 上游在高峰时段会对 claim 接口返回业务码 9074（"当前参与用户太多，请稍后再试"），
+// 这是**瞬时**限流而非错误。原实现只重试 1 次（等待 8s 固定），在高峰时段几乎必然
+// 失败——实测连续 57 次签到全部因此失败。
+//
+// 现改为：最多 CheckinMaxTry 次尝试，等待时间按指数退避（base, 2×base, 4×base…）
+// 并叠加抖动，避免多账号同时重试再次撞上高峰。耗尽后返回 *ErrCheckinRateLimited，
+// 交由调度器安排稍后重试（而非判定账号异常）。
 func (c *Client) CheckinClaim(a *auth.Auth) error {
-	log.Printf("traework checkin claim start uid=%s", a.UID)
-	for attempt := 0; attempt < 2; attempt++ {
+	maxTry := c.CheckinMaxTry
+	if maxTry <= 0 {
+		maxTry = 4
+	}
+	base := c.CheckinRetry
+	if base <= 0 {
+		base = 8 * time.Second
+	}
+
+	var lastMsg string
+	for attempt := 0; attempt < maxTry; attempt++ {
 		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
 		if err != nil {
 			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
@@ -275,12 +332,17 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
 			return err
 		}
-		if code == 9074 && attempt == 0 {
-			delay := c.CheckinRetryDelay
-			if delay > 0 {
-				log.Printf("traework checkin claim rate-limited uid=%s code=9074 retry_after=%s", a.UID, delay)
-				time.Sleep(delay)
+		lastMsg = msg
+
+		// 9074 限流：非最后一次则退避等待后重试。
+		if code == CheckinRateLimitCode {
+			if attempt == maxTry-1 {
+				break // 耗尽重试，交由调度器稍后重试
 			}
+			delay := backoffDelay(base, attempt)
+			log.Printf("traework checkin claim rate-limited uid=%s code=%d attempt=%d/%d retry_after=%s",
+				a.UID, code, attempt+1, maxTry, delay)
+			time.Sleep(delay)
 			continue
 		}
 		if code != 0 {
@@ -296,7 +358,32 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		log.Printf("traework checkin claim response uid=%s code=%d msg=%s", a.UID, code, msg)
 		return nil // 9095 等业务无害响应交给后置 status 验证最终状态
 	}
-	return fmt.Errorf("checkin claim rate limited: code=9074")
+
+	log.Printf("traework checkin claim rate-limited-exhausted uid=%s attempts=%d last_msg=%s",
+		a.UID, maxTry, lastMsg)
+	return &ErrCheckinRateLimited{Attempts: maxTry, Msg: lastMsg}
+}
+
+// backoffDelay 计算第 attempt 次（0 基）重试的等待时间：
+// base × 2^attempt，叠加 ±25% 抖动，上限 2 分钟。
+// 抖动用于打散多账号的重试时刻，避免同步撞上同一波高峰。
+func backoffDelay(base time.Duration, attempt int) time.Duration {
+	const maxDelay = 2 * time.Minute
+	d := base
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d >= maxDelay {
+			d = maxDelay
+			break
+		}
+	}
+	// ±25% 抖动
+	jitter := time.Duration(float64(d) * 0.25 * (rand.Float64()*2 - 1))
+	out := d + jitter
+	if out < time.Second {
+		out = time.Second
+	}
+	return out
 }
 
 func (c *Client) DailyCheckin(a *auth.Auth) error {

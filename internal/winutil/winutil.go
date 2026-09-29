@@ -28,11 +28,23 @@ var (
 	procBringWindowToTop     = user32.NewProc("BringWindowToTop")
 	procGetWindowRect        = user32.NewProc("GetWindowRect")
 	procIsHungAppWindow      = user32.NewProc("IsHungAppWindow")
+	procIsIconic             = user32.NewProc("IsIconic")
+	procIsWindowVisible      = user32.NewProc("IsWindowVisible")
+	procShowWindow           = user32.NewProc("ShowWindow")
+	procIsWindow             = user32.NewProc("IsWindow")
+	procEnumDisplayMonitors  = user32.NewProc("EnumDisplayMonitors")
+	procGetMonitorInfoW      = user32.NewProc("GetMonitorInfoW")
 )
 
 const (
 	spiGetWorkArea = 0x0030
 	wsExToolWindow = 0x00000080
+
+	// ShowWindow 命令码
+	swHide         = 0
+	swShowNormal   = 1
+	swRestore      = 9
+	swShowNoActive = 4
 )
 
 // gwlExStyle GWL_EXSTYLE 索引；负数，需运行时转换，故用 var。
@@ -43,6 +55,54 @@ func WorkArea() (int32, int32, int32, int32) {
 	var rect struct{ Left, Top, Right, Bottom int32 }
 	procSystemParametersInfo.Call(uintptr(spiGetWorkArea), 0, uintptr(unsafe.Pointer(&rect)), 0)
 	return rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top
+}
+
+// Monitor 一个显示器（物理坐标，可为负——副屏在主屏左侧/上方时为负）。
+type Monitor struct {
+	X, Y, W, H int32
+}
+
+// rect32 Win32 RECT 布局。
+type rect32 struct{ Left, Top, Right, Bottom int32 }
+
+// monitorInfoEx MONITORINFOEXW 的布局（cbSize 后紧跟 rcMonitor + rcWork + szDevice[32]）。
+// 只需前三个字段即可取工作区，故声明为等价的较小结构并正确设置 cbSize。
+type monitorInfo struct {
+	CbSize    uint32
+	RcMonitor rect32
+	RcWork    rect32
+	DwFlags   uint32
+}
+
+// Monitors 枚举所有显示器的工作区（RcWork，不含任务栏）。
+//
+// 多显示器场景下窗口应落在任一显示器内；只用主屏 WorkArea 判断会把副屏上的
+// 合法位置误判为"出屏"，进而把面板强制拉回主屏（或反之）。
+//
+// 实现说明：回调里的 lprcMonitor 是系统拥有的 RECT 指针，**不可**直接
+// unsafe 转换后长期引用；这里立即把值拷贝出来，并用 GetMonitorInfoW 取工作区。
+func Monitors() []Monitor {
+	var out []Monitor
+	cb := syscall.NewCallback(func(hMonitor, _ uintptr, _ uintptr, _ uintptr) uintptr {
+		mi := monitorInfo{CbSize: uint32(unsafe.Sizeof(monitorInfo{}))}
+		ok, _, _ := procGetMonitorInfoW.Call(hMonitor, uintptr(unsafe.Pointer(&mi)))
+		if ok != 0 {
+			out = append(out, Monitor{
+				X: mi.RcWork.Left,
+				Y: mi.RcWork.Top,
+				W: mi.RcWork.Right - mi.RcWork.Left,
+				H: mi.RcWork.Bottom - mi.RcWork.Top,
+			})
+		}
+		return 1 // 继续枚举
+	})
+	procEnumDisplayMonitors.Call(0, 0, cb, 0)
+	if len(out) == 0 {
+		// 枚举失败兜底：退化为主显示器
+		x, y, w, h := WorkArea()
+		out = append(out, Monitor{X: x, Y: y, W: w, H: h})
+	}
+	return out
 }
 
 // MainWindow 返回 wails 主窗口句柄（类名 wailsWindow）。
@@ -79,12 +139,63 @@ func FocusWindow(hwnd uintptr) {
 
 // IsHungAppWindow 报告窗口是否无响应（IsHungAppWindow：窗口 5 秒未处理消息返回 true）。
 // 用于 WebView2 卡死检测：避免 wails runtime 调用（WindowShow 等）阻塞在无响应窗口上。
+//
+// 注意：仅对**已显示**的窗口有意义。对最小化或隐藏的窗口调用会误报 true，
+// 因此调用方必须先确认窗口可见/非最小化（见 IsMinimized / IsVisible），
+// 否则会把"最小化到托盘"误判成"卡死"从而拒绝恢复窗口。
 func IsHungAppWindow(hwnd uintptr) bool {
 	if hwnd == 0 {
 		return false
 	}
 	res, _, _ := procIsHungAppWindow.Call(hwnd)
 	return res != 0
+}
+
+// IsWindowValid 报告句柄是否仍是有效窗口（窗口可能已被销毁）。
+func IsWindowValid(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	res, _, _ := procIsWindow.Call(hwnd)
+	return res != 0
+}
+
+// IsMinimized 报告窗口是否处于最小化状态。
+func IsMinimized(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	res, _, _ := procIsIconic.Call(hwnd)
+	return res != 0
+}
+
+// IsVisible 报告窗口是否可见（WS_VISIBLE）。
+func IsVisible(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	res, _, _ := procIsWindowVisible.Call(hwnd)
+	return res != 0
+}
+
+// RestoreAndShow 确保窗口被恢复并显示：
+// 最小化 → SW_RESTORE；已隐藏 → SW_SHOWNORMAL。返回是否确实执行了恢复动作。
+//
+// Win11 下若窗口处于最小化状态，SetForegroundWindow / BringWindowToTop
+// 都无法把它拉回前台，必须先 ShowWindow(SW_RESTORE) 解除最小化。
+func RestoreAndShow(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	acted := false
+	if IsMinimized(hwnd) {
+		procShowWindow.Call(hwnd, uintptr(swRestore))
+		acted = true
+	} else if !IsVisible(hwnd) {
+		procShowWindow.Call(hwnd, uintptr(swShowNormal))
+		acted = true
+	}
+	return acted
 }
 
 // ---------------------------------------------------------------------------

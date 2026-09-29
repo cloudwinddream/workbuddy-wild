@@ -243,11 +243,14 @@ func contains(hours []int, h int) bool {
 
 // CheckinResult 单账号签到结果（GUI 面板展示）。
 type CheckinResult struct {
-	UID       string `json:"uid"`
-	OK        bool   `json:"ok"`
-	Msg       string `json:"msg"`
-	Remain    int64  `json:"remain"`
-	HasRemain bool   `json:"has_remain"`
+	UID string `json:"uid"`
+	OK  bool   `json:"ok"`
+	Msg string `json:"msg"`
+	// Retryable 表示失败原因是上游瞬时状态（如高峰限流），
+	// 不是账号本身的问题——不应触发冷却/禁用，稍后重试即可。
+	Retryable bool  `json:"retryable,omitempty"`
+	Remain    int64 `json:"remain"`
+	HasRemain bool  `json:"has_remain"`
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
@@ -315,6 +318,12 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		if isAlready(checkinErr) {
 			r.OK = true // 已签到时视为成功状态
 			r.Msg = "已签到"
+		} else if isRateLimited(checkinErr) {
+			// 上游高峰限流（如 TraeWork 9074）：瞬时状态，不是账号问题。
+			// 不触发冷却/禁用，只是本轮没签到成功，等下次定时或用户手动重试。
+			r.Retryable = true
+			r.Msg = "上游繁忙，稍后自动重试"
+			log.Printf("checkin rate-limited platform=%s uid=%s（可重试，不视为账号异常）", name, uid)
 		}
 	} else {
 		r.OK = true
@@ -338,6 +347,31 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	s.cfg.Pool.RecordCheckin(uid, r.OK, r.Msg)
 	s.notifyCheckin(r)
 	return r
+}
+
+// rateLimited 由上游客户端实现的"可重试瞬时错误"标记。
+// 用接口探测而非直接 import 具体平台包，避免 scheduler 与各上游耦合。
+type rateLimited interface {
+	IsRateLimited() bool
+}
+
+// isRateLimited 判断错误是否为上游高峰限流（瞬时、可重试，非账号异常）。
+// 同时兼容两类表达：
+//   - 上游客户端定义的错误类型实现了 IsRateLimited() bool
+//   - provider.Error 被分类为 ErrSoftRate（429 类软限流）
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rl rateLimited
+	if errors.As(err, &rl) {
+		return rl.IsRateLimited()
+	}
+	var pe *provider.Error
+	if errors.As(err, &pe) {
+		return pe.Kind == provider.ErrSoftRate
+	}
+	return false
 }
 
 // isAlready 只匹配明确的“今日已签到”，不能因错误文本包含 checkin 就判成功。

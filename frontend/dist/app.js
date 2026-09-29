@@ -501,7 +501,14 @@ function bind() {
   });
   rt.EventsOn("checkin", (e) => {
     const prefix = e.platform ? `${e.platform} ${e.uid}: ` : "签到：";
-    toast(prefix + (e.ok ? (e.msg || "成功") : `失败：${e.msg || "未知错误"}`));
+    if (e.ok) {
+      toast(prefix + (e.msg || "成功"));
+    } else if (e.retryable) {
+      // 上游瞬时繁忙（如高峰限流）：不是账号问题，会自动重试，措辞不要引起恐慌
+      toast(prefix + (e.msg || "上游繁忙，稍后自动重试") + "（将自动重试）");
+    } else {
+      toast(prefix + `失败：${e.msg || "未知错误"}`);
+    }
   });
   rt.EventsOn("refresh", (e) => {
     toast(`${e.platform || "账号"} ${e.uid || ""} 令牌刷新失败：${e.msg || "未知错误"}`);

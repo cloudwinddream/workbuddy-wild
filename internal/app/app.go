@@ -334,9 +334,14 @@ func (a *App) panelRect() (x, y, pw, ph int) {
 		ph = int(waH)
 	}
 	x, y = winutil.PanelAnchor(pw, ph)
-	// 用户拖拽过面板 → 恢复保存的位置（仍 clamp 在工作区内，防分辨率变化出屏）
-	if sx, sy, ok := a.savedPanelPos(); ok {
+	// 用户拖拽过面板 → 恢复保存的位置。
+	// 但必须校验该位置在当前显示器上仍**可见**：分辨率变化、显示器拔插、
+	// 或拖拽时保存了屏幕边缘外的坐标，都会导致恢复后窗口落在屏幕外——
+	// 表现为"托盘点了没反应"（窗口其实显示了，只是在屏幕外看不见）。
+	if sx, sy, ok := a.savedPanelPos(); ok && a.posVisibleOnAnyMonitor(sx, sy, pw, ph) {
 		x, y = sx, sy
+	} else if ok {
+		log.Printf("保存的面板位置 %d,%d 在当前显示器上不可见，回退到默认位置", sx, sy)
 	}
 	// 工作区边界 clamp（与 PanelAnchor 一致，保存位置同样生效）
 	areaX, areaY := int(waX), int(waY)
@@ -359,6 +364,46 @@ func (a *App) panelRect() (x, y, pw, ph int) {
 		y = 0
 	}
 	return x, y, pw, ph
+}
+
+// posVisibleOnAnyMonitor 判断给定位置的面板是否落在任一显示器的可见区域内。
+//
+// 判据：面板标题区（顶部 40px 高、水平方向至少 120px 宽）必须与某个显示器
+// 有实质重叠——只判断"左上角在屏内"不够，因为窗口可能绝大部分在屏外只剩一条边。
+// 多显示器坐标可为负（副屏在主屏左上），所以不能简单地假设 x/y >= 0。
+func (a *App) posVisibleOnAnyMonitor(x, y, pw, ph int) bool {
+	const minVisibleW, minVisibleH = 120, 40
+	// 面板顶部一小条：拖拽/关闭按钮都在这里，只要它可见用户就能操作。
+	barH := minInt(ph, minVisibleH)
+	for _, m := range winutil.Monitors() {
+		// 显示器矩形（含一定容差，避免边界像素误差导致误判）
+		mx1, my1 := int(m.X), int(m.Y)
+		mx2, my2 := int(m.X+m.W), int(m.Y+m.H)
+		// 面板顶部条矩形
+		px1, py1 := x, y
+		px2, py2 := x+pw, y+barH
+		// 求交集
+		ix1, iy1 := maxInt(px1, mx1), maxInt(py1, my1)
+		ix2, iy2 := minInt(px2, mx2), minInt(py2, my2)
+		if ix2-ix1 >= minVisibleW && iy2-iy1 > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // SavePanelPos 保存面板位置（前端拖拽结束后调用），下次启动恢复。
@@ -418,7 +463,8 @@ func (a *App) ShowPanel() {
 		return
 	}
 	// 检测 WebView2 进程是否已崩溃（窗口句柄为 0）
-	if hwnd := winutil.MainWindow(); hwnd == 0 {
+	hwnd := winutil.MainWindow()
+	if hwnd == 0 || !winutil.IsWindowValid(hwnd) {
 		winutil.InfoBox("面板已崩溃",
 			"管理面板（WebView2）已意外退出。\n"+
 				"HTTP 服务与自动签到仍在正常运行。\n\n"+
@@ -426,9 +472,15 @@ func (a *App) ShowPanel() {
 				"API 地址："+addr)
 		return
 	}
-	// WebView2 无响应检测：窗口 5 秒未处理消息 → 判定卡死。
+	// Win11 修复：先解除最小化/隐藏，再判断是否卡死。
+	// 最小化的窗口 IsHungAppWindow 会误报 true，若先判断就会把"收起"当成"卡死"
+	// 从而拒绝恢复——这正是"缩到托盘后无法恢复"的根因。
+	if winutil.RestoreAndShow(hwnd) {
+		log.Printf("面板窗口已从最小化/隐藏状态恢复")
+	}
+	// WebView2 无响应检测：仅对**可见**窗口判定，5 秒未处理消息才算卡死。
 	// 此时若继续调 wails runtime（WindowShow 等）会永久阻塞，必须拦截。
-	if winutil.IsHungAppWindow(winutil.MainWindow()) {
+	if winutil.IsVisible(hwnd) && winutil.IsHungAppWindow(hwnd) {
 		log.Printf("面板无响应：WebView2 窗口 IsHungAppWindow=true（跳过显示，避免阻塞）")
 		winutil.InfoBox("面板无响应",
 			"管理面板（WebView2）长时间未响应，可能已卡死。\n"+
@@ -1139,13 +1191,15 @@ func (a *App) NotifyRefresh(platform, uid string, ok bool, msg string) {
 
 // NotifyCheckin 将自动/手动签到结果推送到日志和面板。
 func (a *App) NotifyCheckin(platform string, r scheduler.CheckinResult) {
-	log.Printf("GUI checkin platform=%s uid=%s ok=%t msg=%s remain=%d has_remain=%t", platform, r.UID, r.OK, r.Msg, r.Remain, r.HasRemain)
+	log.Printf("GUI checkin platform=%s uid=%s ok=%t retryable=%t msg=%s remain=%d has_remain=%t",
+		platform, r.UID, r.OK, r.Retryable, r.Msg, r.Remain, r.HasRemain)
 	a.emitAccounts()
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "checkin", map[string]any{
 			"platform":   platform,
 			"uid":        r.UID,
 			"ok":         r.OK,
+			"retryable":  r.Retryable,
 			"msg":        r.Msg,
 			"remain":     r.Remain,
 			"has_remain": r.HasRemain,
