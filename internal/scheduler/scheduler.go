@@ -28,13 +28,42 @@ type Config struct {
 	KeepaliveHours []int  // 默认 [22]
 }
 
+// 限流重试参数。
+//
+// 背景：TraeWork 的签到 claim 接口在高峰会返回 9074（"当前参与用户太多"）。
+// 单次调用内虽然已有指数退避重试（CheckinClaim 内 4 次 / 约 58 秒），
+// 但高峰可能持续更久。原实现在耗尽后**只是标记 Retryable 而无人消费**，
+// 用户看到的"稍后自动重试"实际要等到下一个定时点（可能间隔数小时）。
+//
+// 现在：耗尽后由调度器安排**独立的延迟重试**，不依赖下一次定时签到。
+const (
+	// rateLimitRetryDelay 限流耗尽后的首次延迟重试间隔。
+	// 取 10 分钟：足够跨过一波瞬时高峰，又不会让用户等太久。
+	rateLimitRetryDelay = 10 * time.Minute
+
+	// rateLimitRetryMax 单个账号每天最多安排多少次限流延迟重试。
+	// 防止上游长时间异常时无限重试刷屏。
+	rateLimitRetryMax = 6
+)
+
+// retryState 单个账号的限流重试状态。
+type retryState struct {
+	count    int       // 已安排的延迟重试次数（当天）
+	lastDay  int       // 归属日期（一年中的第几天），跨天重置
+	nextAt   time.Time // 下次重试时刻
+	pending  bool      // 是否有待执行的重试
+}
+
 // Scheduler 调度器。
 type Scheduler struct {
-	mu        sync.Mutex // 保护 cfg 中的小时配置
+	mu        sync.Mutex                 // 保护 cfg 中的小时配置
 	cfg       Config
 	wake      chan struct{}              // 配置变更唤醒 Run 循环重算下次触发
 	onCheckin func(CheckinResult)        // 结果观察器，供 GUI 接收自动签到结果
 	onRefresh func(string, bool, string) // token 刷新结果观察器
+
+	retryMu sync.Mutex            // 保护 retries
+	retries map[string]*retryState // uid → 限流重试状态
 }
 
 // New 构建。
@@ -54,7 +83,68 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
-	return &Scheduler{cfg: cfg, wake: make(chan struct{}, 1)}
+	return &Scheduler{cfg: cfg, wake: make(chan struct{}, 1), retries: map[string]*retryState{}}
+}
+
+// markRetryable 记录某账号需要延迟重试，并返回安排的时刻。
+//
+// 仅在限流耗尽时调用。返回 (下次重试时刻, 是否还能重试)：
+//   - 跨天自动重置计数
+//   - 超过 rateLimitRetryMax 后不再安排（返回 ok=false）
+func (s *Scheduler) markRetryable(uid string, now time.Time) (time.Time, bool) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	st := s.retries[uid]
+	day := now.YearDay()
+	if st == nil || st.lastDay != day {
+		st = &retryState{lastDay: day}
+		s.retries[uid] = st
+	}
+	if st.count >= rateLimitRetryMax {
+		return time.Time{}, false
+	}
+	st.count++
+	// 递增退避：10min, 20min, 30min, ...（线性增长，避免像指数那样很快跨过小时级）
+	st.nextAt = now.Add(rateLimitRetryDelay * time.Duration(st.count))
+	st.pending = true
+	return st.nextAt, true
+}
+
+// dueRetries 取出所有已到期的重试账号，并清除其 pending 标记。
+func (s *Scheduler) dueRetries(now time.Time) []string {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	var out []string
+	for uid, st := range s.retries {
+		if st.pending && !now.Before(st.nextAt) {
+			st.pending = false
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+// nextRetryAt 返回最近一次待执行重试的时刻（无则返回零值）。
+func (s *Scheduler) nextRetryAt() time.Time {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	var best time.Time
+	for _, st := range s.retries {
+		if !st.pending {
+			continue
+		}
+		if best.IsZero() || st.nextAt.Before(best) {
+			best = st.nextAt
+		}
+	}
+	return best
+}
+
+// clearRetry 账号签到成功后清除其重试状态。
+func (s *Scheduler) clearRetry(uid string) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	delete(s.retries, uid)
 }
 
 // schedule 返回当前签到分钟/保活小时配置的副本。
@@ -203,6 +293,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 		ch, kh := s.schedule()
 		all := append(append([]int{}, ch...), hoursToMinutes(kh)...)
 		next := nextFireMinutes(time.Now(), all)
+		// 若有待执行的限流重试且早于下次定时点，则以重试时刻为准唤醒。
+		if ra := s.nextRetryAt(); !ra.IsZero() && ra.Before(next) {
+			next = ra
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
@@ -218,6 +312,36 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 			if contains(kh, now.Hour()) {
 				s.RunKeepaliveNow()
+			}
+			// 到期重试：只签这些账号，不影响其它账号
+			s.runDueRetries(now)
+		}
+	}
+}
+
+// runDueRetries 对已到期的限流账号单独重试签到。
+func (s *Scheduler) runDueRetries(now time.Time) {
+	uids := s.dueRetries(now)
+	if len(uids) == 0 {
+		return
+	}
+	name := s.name()
+	log.Printf("checkin retry start platform=%s accounts=%d uids=%v", name, len(uids), uids)
+	for _, uid := range uids {
+		if s.cfg.Pool.AuthByUID(uid) == nil {
+			s.clearRetry(uid) // 账号已被删除
+			continue
+		}
+		r := s.checkinOne(uid)
+		if r.OK {
+			s.clearRetry(uid) // 成功，不再重试
+		} else if r.Retryable {
+			if at, ok := s.markRetryable(uid, now); ok {
+				log.Printf("checkin retry scheduled platform=%s uid=%s at=%s",
+					name, uid, at.Format("15:04:05"))
+			} else {
+				log.Printf("checkin retry exhausted-for-today platform=%s uid=%s",
+					name, uid)
 			}
 		}
 	}
@@ -320,14 +444,22 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 			r.Msg = "已签到"
 		} else if isRateLimited(checkinErr) {
 			// 上游高峰限流（如 TraeWork 9074）：瞬时状态，不是账号问题。
-			// 不触发冷却/禁用，只是本轮没签到成功，等下次定时或用户手动重试。
+			// 不触发冷却/禁用。此处**安排一次延迟重试**——原实现只打标记无人消费，
+			// 导致"稍后自动重试"实际要等到下一个定时点（可能间隔数小时）。
 			r.Retryable = true
 			r.Msg = "上游繁忙，稍后自动重试"
 			log.Printf("checkin rate-limited platform=%s uid=%s（可重试，不视为账号异常）", name, uid)
+			if at, ok := s.markRetryable(uid, time.Now()); ok {
+				log.Printf("checkin retry scheduled platform=%s uid=%s at=%s",
+					name, uid, at.Format("15:04:05"))
+			} else {
+				log.Printf("checkin retry exhausted-for-today platform=%s uid=%s", name, uid)
+			}
 		}
 	} else {
 		r.OK = true
 		r.Msg = "ok"
+		s.clearRetry(uid) // 签到成功，清除待重试状态
 	}
 	// 无论签到成败都查余额（已签到等业务错误下余额刷新仍有效）
 	remain, rerr := s.cfg.Upstream.UserResource(a)
