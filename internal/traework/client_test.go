@@ -505,3 +505,40 @@ func TestUserResourceTolerantFieldNames(t *testing.T) {
 		})
 	}
 }
+
+// 9095 的正确语义：「本设备今日签到额度已被领走」。
+//
+// 这与"本账号今日已签"完全不同 —— 上游按**设备**计发，一天一份。
+// 同设备下的第二个账号 claim 会拿到 9095，但该账号**一分未得**。
+//
+// 旧实现把它当普通成功返回 nil，再被 verifyCheckedIn 的
+// did_checked_in=true（设备级）印证，就成了"签到成功" —— 典型的误报。
+func TestCheckinClaim9095IsDeviceClaimedNotSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpCheckinClaim {
+			_, _ = w.Write([]byte(`{"code":9095,"message":"当前设备今日已经签到，请明日再来哦～"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	err := c.CheckinClaim(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"})
+	if err == nil {
+		t.Fatal("9095 必须返回错误，不能当成功（该账号并未领到额度）")
+	}
+	if !IsCheckinAlreadyClaimed(err) {
+		t.Fatalf("err=%v, want ErrCheckinAlreadyClaimed", err)
+	}
+	var dc interface{ IsDeviceClaimed() bool }
+	if !errors.As(err, &dc) || !dc.IsDeviceClaimed() {
+		t.Fatal("必须实现 IsDeviceClaimed() 返回 true，供调度器区分设备级去重")
+	}
+	// 它不该被误认为 9074（那是设备未注册，需换设备号）
+	if IsCheckinRateLimited(err) {
+		t.Fatal("9095 不是 9074（设备未注册），不可混淆")
+	}
+}

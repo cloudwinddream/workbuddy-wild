@@ -443,12 +443,22 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	if checkinErr != nil {
 		log.Printf("checkin failed platform=%s uid=%s err=%v", name, uid, checkinErr)
 		r.Msg = shortErr(checkinErr)
-		if isAlready(checkinErr) {
-			// 今天已经签过了：这是**正常状态**，不是本次领到了额度。
+		// 判定顺序有讲究：先看"本设备额度已被领走"，再看"本账号今日已签"。
+		// 两者的上游文案都带"已签到"字样，但语义完全不同：
+		//   - deviceClaimed：额度被**同设备的别的账号**领走了 → 本账号今天没份
+		//   - already      ：本账号自己已经签过 → 幂等成功
+		if isDeviceClaimed(checkinErr) {
+			// 同设备下的额度已被领走。这不是失败也不是成功：
+			// 本账号今天领不到，需要给它配一个**独立的真实设备号**才能领。
+			r.OK = false
+			r.AlreadyChecked = true // 今日这一份已用完，别再催用户重试
+			r.Msg = "本设备今日签到额度已被同设备其它账号领走（每设备每天限一份）"
+			log.Printf("checkin device-claimed-by-other platform=%s uid=%s（需为每个账号配独立设备号）", name, uid)
+		} else if isAlready(checkinErr) {
+			// 本账号今天已经签过了：这是**正常状态**，不是本次领到了额度。
 			//
 			// 文案必须说清"本次没有新增积分"，否则用户看到绿色的"签到成功"
 			// 却发现积分没涨，会以为程序坏了（真实反馈过这一点）。
-			// 积分今天已在早先那次签到时入账，重复签到上游返回 9095。
 			r.OK = true
 			r.AlreadyChecked = true
 			r.Msg = "今日已签到（积分已在早先签到到账）"
@@ -507,6 +517,25 @@ func isRateLimited(err error) bool {
 		return pe.Kind == provider.ErrSoftRate
 	}
 	return false
+}
+
+// deviceClaimed 由上游客户端实现的"本设备今日额度已被领走"标记。
+// 用接口探测而非直接 import 具体平台包，避免 scheduler 与各上游耦合。
+type deviceClaimed interface {
+	IsDeviceClaimed() bool
+}
+
+// isDeviceClaimed 判断错误是否为「本设备今日签到额度已被其它账号领走」。
+//
+// 与 isAlready 的区别（两者上游文案都含"已签到"，极易混淆）：
+//   - deviceClaimed：额度被**同设备的别的账号**领走了 → 本账号今天没份，OK=false
+//   - already      ：本账号自己签过了 → 幂等成功，OK=true
+func isDeviceClaimed(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dc deviceClaimed
+	return errors.As(err, &dc) && dc.IsDeviceClaimed()
 }
 
 // isAlready 只匹配明确的“今日已签到”，不能因错误文本包含 checkin 就判成功。

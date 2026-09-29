@@ -30,6 +30,20 @@ const (
 
 const DefaultConfigName = "glm-5.2"
 
+// CheckinAlreadyClaimedCode 签到业务码 9095：「当前设备今日已经签到，请明日再来哦～」。
+//
+// ⚠️ 关键语义：这是**设备级**去重，不是"本账号已签到"。
+// 上游按设备计发签到额度，一天一份；同一设备号下的多个账号只有第一个能领到，
+// 其余账号 claim 都返 9095。
+//
+// 麻烦之处在于 status 的 `did_checked_in` 也是**设备级**的 —— 拿到 9095 的账号
+// 查 status 一样显示 did_checked_in=true，因此**无法用 status 区分到底谁领到了**。
+// 唯一可靠的判据是查权益包有没有**今天新建的**（start_time 落在今天）。
+//
+// 因此本码必须当作"本账号没领到"来处理（返回 ErrCheckinAlreadyClaimed），
+// 而不能当成幂等成功 —— 否则会误报"签到成功"而积分其实一分未增。
+const CheckinAlreadyClaimedCode = 9095
+
 // CheckinClaimBody 签到 claim 接口的请求体。
 //
 // **不可用空对象 `{}`** —— 多个独立实现一致确认：空请求体会被服务端拒为 9074

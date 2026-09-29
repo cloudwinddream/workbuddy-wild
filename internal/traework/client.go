@@ -308,6 +308,21 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		return &ErrCheckinRateLimited{Attempts: 1, Msg: msg}
 	}
 	if code != 0 {
+		// 9095 = 本设备今日的签到额度已被领走。
+		//
+		// ⚠️ 这**不等于本账号领到了**：上游按「设备」计发，一天一份。
+		// 若同一设备号下有多个账号，只有第一个账号能拿到；其余账号 claim
+		// 会返 9095，而 status 的 did_checked_in 又是设备级的（同为 true），
+		// 因此**无法用 status 区分**到底是谁领的。
+		//
+		// 旧实现把这个当成普通成功返回 nil，再被 verifyCheckedIn 的
+		// did_checked_in=true 一印证，就成了"签到成功"—— 但该账号其实
+		// 一分未得。这是 v0.5.9 之后仍存在的误报，现改正为显式错误。
+		if code == CheckinAlreadyClaimedCode {
+			log.Printf("traework checkin claim device-claimed uid=%s code=%d device=%s（本设备今日额度已被领走）",
+				a.UID, code, shortDevice(a.DeviceID))
+			return &ErrCheckinAlreadyClaimed{Msg: msg, Device: shortDevice(a.DeviceID)}
+		}
 		err := fmt.Errorf("checkin claim code=%d msg=%s", code, msg)
 		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
 		return err
@@ -319,7 +334,33 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	}
 	log.Printf("traework checkin claim response uid=%s code=%d msg=%s device=%s",
 		a.UID, code, msg, shortDevice(a.DeviceID))
-	return nil // 9095 等业务无害响应交给后置 status 验证最终状态
+	return nil
+}
+
+// ErrCheckinAlreadyClaimed 本设备今日的签到额度已被（本设备上的某个账号）领走。
+//
+// 这是**设备级**的去重，不是账号异常，也不代表本账号签到成功。
+// 错误信息会明确告知用户：想多账号都领到，需要给每个账号配不同的真实设备号。
+type ErrCheckinAlreadyClaimed struct {
+	Msg    string
+	Device string
+}
+
+func (e *ErrCheckinAlreadyClaimed) Error() string {
+	return fmt.Sprintf("checkin 9095 (device already claimed today, device=%s): %s", e.Device, e.Msg)
+}
+
+// IsDeviceClaimed 实现 scheduler 的 deviceClaimed 接口，
+// 让调度器能把「额度被同设备别的账号领走」与「本账号自己已签」区分开。
+func (e *ErrCheckinAlreadyClaimed) IsDeviceClaimed() bool { return true }
+
+// IsCheckinAlreadyClaimed 报告错误是否为「本设备今日额度已被领走」。
+func IsCheckinAlreadyClaimed(err error) bool {
+	if err == nil {
+		return false
+	}
+	var t *ErrCheckinAlreadyClaimed
+	return errors.As(err, &t)
 }
 
 // shortDevice 只显示设备号前 6 位，避免日志泄漏完整指纹。
@@ -369,7 +410,11 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 // 对 API 调用方**恒为 false**。若用它做验证，每次签到都会误判为失败，
 // 并在调度器里触发无意义的重试。这是 v0.5.5 之前未被发现的第二个 bug。
 //
-// 加分项也兼容：可见积分字段（credits/extra_credits）由 status 正常返回。
+// ⚠️ 另注意 did_checked_in 是**设备级**的，不能证明"本账号"领到了额度：
+// 同设备下的第二个账号 claim 会拿到 9095，但查 status 一样是 true。
+// 因此本函数只用于确认"claim 之后设备层面确实已签"，
+// 真正的"本账号是否新增额度"要靠 CheckinClaim 的返回值把关
+// （9095 → ErrCheckinAlreadyClaimed）。
 func (c *Client) verifyCheckedIn(a *auth.Auth) error {
 	const maxTry = 3
 	for attempt := 0; attempt < maxTry; attempt++ {

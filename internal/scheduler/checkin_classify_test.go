@@ -10,6 +10,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
+	"github.com/rockswang/workbuddy-wild/internal/traework"
 )
 
 // stubUpstream 用可控的签到/余额结果替代真实上游。
@@ -104,5 +105,32 @@ func TestCheckinDeviceRejectedNotRetryable(t *testing.T) {
 	}
 	if r.Msg == "" {
 		t.Fatal("必须给出可操作的错误文案")
+	}
+}
+
+// 9095 与「本账号已签」必须在调度器层面区分开：
+//   - 9095（本设备额度被别的账号领走）→ 本账号没领到，OK=false
+//   - 已签（自己签过了）              → 幂等成功，OK=true
+//
+// 两者的上游文案都含"已签到"字样，极易混淆；只有靠错误类型区分才可靠。
+func TestSchedulerDistinguishesDeviceClaimedFromAlready(t *testing.T) {
+	f := &stubUpstream{
+		checkinErr: &traework.ErrCheckinAlreadyClaimed{Msg: "当前设备今日已经签到", Device: "4484…"},
+		remain:     4600,
+	}
+	p := pool.New("")
+	s := New(Config{Name: "traework", Pool: p, Upstream: f})
+	p.Add(&auth.Auth{Kind: "traework", UID: "u2", RefreshToken: "rt", AccessToken: "at",
+		ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
+
+	r := s.checkinOne("u2")
+	if r.OK {
+		t.Fatal("9095 = 额度被同设备别的账号领走，本账号没领到，OK 必须为 false")
+	}
+	if !r.AlreadyChecked {
+		t.Fatal("应标记 AlreadyChecked（今日这一份已用完），避免催用户重试")
+	}
+	if r.Msg == "" {
+		t.Fatal("必须有可操作的提示文案")
 	}
 }
