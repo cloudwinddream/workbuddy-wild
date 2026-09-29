@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,12 +109,15 @@ func TestCheckinDeviceRejectedNotRetryable(t *testing.T) {
 	}
 }
 
-// 9095 与「本账号已签」必须在调度器层面区分开：
-//   - 9095（本设备额度被别的账号领走）→ 本账号没领到，OK=false
-//   - 已签（自己签过了）              → 幂等成功，OK=true
+// 9095（ErrCheckinAlreadyClaimed）是**幂等成功**：该账号今日已领。
 //
-// 两者的上游文案都含"已签到"字样，极易混淆；只有靠错误类型区分才可靠。
-func TestSchedulerDistinguishesDeviceClaimedFromAlready(t *testing.T) {
+// 去重键是「账号 + 设备」而非纯设备 —— 实测两个账号用**完全相同**的设备号，
+// 一个返 9095、一个返 success。所以同一设备号下多账号本来就能各签一次，
+// 不需要给每个账号单独配设备号。
+//
+// v0.6.0 曾误判为"设备级独占"，把它当成 OK=false 并提示"额度被别的账号领走"，
+// 这会误导用户以为多账号不可行。本测试锁定改正后的语义。
+func TestCheckinAlreadyClaimedIsIdempotentSuccess(t *testing.T) {
 	f := &stubUpstream{
 		checkinErr: &traework.ErrCheckinAlreadyClaimed{Msg: "当前设备今日已经签到", Device: "4484…"},
 		remain:     4600,
@@ -124,13 +128,17 @@ func TestSchedulerDistinguishesDeviceClaimedFromAlready(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
 
 	r := s.checkinOne("u2")
-	if r.OK {
-		t.Fatal("9095 = 额度被同设备别的账号领走，本账号没领到，OK 必须为 false")
+	if !r.OK {
+		t.Fatal("9095 = 该账号今日已领，属幂等成功，OK 必须为 true（v0.6.0 曾误判为 false）")
 	}
 	if !r.AlreadyChecked {
-		t.Fatal("应标记 AlreadyChecked（今日这一份已用完），避免催用户重试")
+		t.Fatal("必须标记 AlreadyChecked，前端据此说明\"本次无新增积分\"")
 	}
 	if r.Msg == "" {
-		t.Fatal("必须有可操作的提示文案")
+		t.Fatal("必须有说明性文案")
+	}
+	// 绝不能提示成"设备额度被别占"，那会误导用户以为多账号不可行
+	if strings.Contains(r.Msg, "被其它账号领走") || strings.Contains(r.Msg, "每设备每天限一份") {
+		t.Fatalf("文案误导：%q（去重是账号级，不是设备级独占）", r.Msg)
 	}
 }

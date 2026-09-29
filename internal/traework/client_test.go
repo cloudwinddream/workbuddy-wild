@@ -506,14 +506,16 @@ func TestUserResourceTolerantFieldNames(t *testing.T) {
 	}
 }
 
-// 9095 的正确语义：「本设备今日签到额度已被领走」。
+// 9095 的正确语义：**该账号在当前设备上今日已领**（幂等成功）。
 //
-// 这与"本账号今日已签"完全不同 —— 上游按**设备**计发，一天一份。
-// 同设备下的第二个账号 claim 会拿到 9095，但该账号**一分未得**。
+// 去重键是「账号 + 设备」而非纯设备。决定性实测（2026-09-30）：
+// 两个账号用**完全相同**的设备号 4484256452647802，
+//   账号1 -> 9095，账号2 -> code:0 success
+// 若为设备级，账号2 用同一设备号必然也被拒。它成功了 ⇒ 不是设备级。
 //
-// 旧实现把它当普通成功返回 nil，再被 verifyCheckedIn 的
-// did_checked_in=true（设备级）印证，就成了"签到成功" —— 典型的误报。
-func TestCheckinClaim9095IsDeviceClaimedNotSuccess(t *testing.T) {
+// 这与用户实机经验一致：同一客户端手动换账号，每个账号都能各签一次。
+// v0.6.0 曾误判为"设备级独占"，v0.6.1 已改正。
+func TestCheckinClaim9095IsAlreadyClaimed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == EpCheckinClaim {
 			_, _ = w.Write([]byte(`{"code":9095,"message":"当前设备今日已经签到，请明日再来哦～"}`))
@@ -528,17 +530,40 @@ func TestCheckinClaim9095IsDeviceClaimedNotSuccess(t *testing.T) {
 	c.UgHost = srv.URL
 	err := c.CheckinClaim(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"})
 	if err == nil {
-		t.Fatal("9095 必须返回错误，不能当成功（该账号并未领到额度）")
+		t.Fatal("9095 必须返回 ErrCheckinAlreadyClaimed，以便上层按\"今日已签\"展示")
 	}
 	if !IsCheckinAlreadyClaimed(err) {
 		t.Fatalf("err=%v, want ErrCheckinAlreadyClaimed", err)
 	}
-	var dc interface{ IsDeviceClaimed() bool }
-	if !errors.As(err, &dc) || !dc.IsDeviceClaimed() {
-		t.Fatal("必须实现 IsDeviceClaimed() 返回 true，供调度器区分设备级去重")
-	}
 	// 它不该被误认为 9074（那是设备未注册，需换设备号）
 	if IsCheckinRateLimited(err) {
 		t.Fatal("9095 不是 9074（设备未注册），不可混淆")
+	}
+}
+
+// claim 缺少 X-Device-Id 时上游返回 9004（订单参数不正确）。
+// 这解释了为什么"不带设备号"不能作为绕过手段。
+func TestCheckinClaimWithoutDeviceRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Device-Id") == "" {
+			_, _ = w.Write([]byte(`{"code":9004,"message":"The submitted order parameters are incorrect."}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+
+	// 不带设备号 → 9004
+	err := c.CheckinClaim(&auth.Auth{AccessToken: "at"})
+	if err == nil || IsCheckinAlreadyClaimed(err) || IsCheckinRateLimited(err) {
+		t.Fatalf("缺设备号应报普通错误，得到 %v", err)
+	}
+	// 带真实设备号 → 成功
+	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"}); err != nil {
+		t.Fatalf("带设备号应成功，得到 %v", err)
 	}
 }

@@ -308,18 +308,16 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		return &ErrCheckinRateLimited{Attempts: 1, Msg: msg}
 	}
 	if code != 0 {
-		// 9095 = 本设备今日的签到额度已被领走。
+		// 9095 = 该账号在当前设备上今日已领。**幂等成功**，不是失败。
 		//
-		// ⚠️ 这**不等于本账号领到了**：上游按「设备」计发，一天一份。
-		// 若同一设备号下有多个账号，只有第一个账号能拿到；其余账号 claim
-		// 会返 9095，而 status 的 did_checked_in 又是设备级的（同为 true），
-		// 因此**无法用 status 区分**到底是谁领的。
+		// 去重键是「账号 + 设备」，不是纯设备 —— 实测：两个账号用**完全相同**
+		// 的设备号，账号1 返 9095、账号2 返 success。若为设备级，两者应同为 9095。
+		// 这与用户实机经验一致：同一客户端手动换账号，每个账号都能各签一次。
 		//
-		// 旧实现把这个当成普通成功返回 nil，再被 verifyCheckedIn 的
-		// did_checked_in=true 一印证，就成了"签到成功"—— 但该账号其实
-		// 一分未得。这是 v0.5.9 之后仍存在的误报，现改正为显式错误。
+		// 因此这里返回 ErrCheckinAlreadyClaimed 让上层按"今日已签"展示，
+		// 而不是当成"没领到"（v0.6.0 曾误判为后者，已改正）。
 		if code == CheckinAlreadyClaimedCode {
-			log.Printf("traework checkin claim device-claimed uid=%s code=%d device=%s（本设备今日额度已被领走）",
+			log.Printf("traework checkin claim already-claimed uid=%s code=%d device=%s（该账号在本设备今日已领）",
 				a.UID, code, shortDevice(a.DeviceID))
 			return &ErrCheckinAlreadyClaimed{Msg: msg, Device: shortDevice(a.DeviceID)}
 		}
@@ -337,24 +335,26 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	return nil
 }
 
-// ErrCheckinAlreadyClaimed 本设备今日的签到额度已被（本设备上的某个账号）领走。
+// ErrCheckinAlreadyClaimed 该账号在当前设备上今日已经领过签到额度。
 //
-// 这是**设备级**的去重，不是账号异常，也不代表本账号签到成功。
-// 错误信息会明确告知用户：想多账号都领到，需要给每个账号配不同的真实设备号。
+// 这是**幂等成功**（不是失败、也不是账号异常）：重复签到拿到它属正常。
+// 去重键是「账号 + 设备」，所以同一设备号下的不同账号各自都能领一次。
 type ErrCheckinAlreadyClaimed struct {
 	Msg    string
 	Device string
 }
 
 func (e *ErrCheckinAlreadyClaimed) Error() string {
-	return fmt.Sprintf("checkin 9095 (device already claimed today, device=%s): %s", e.Device, e.Msg)
+	return fmt.Sprintf("checkin 9095 (already claimed today, device=%s): %s", e.Device, e.Msg)
 }
 
-// IsDeviceClaimed 实现 scheduler 的 deviceClaimed 接口，
-// 让调度器能把「额度被同设备别的账号领走」与「本账号自己已签」区分开。
+// IsDeviceClaimed 返回 true，表示这是"今日已领"类的幂等结果。
+//
+// 命名保留 history：早期（v0.6.0）误以为它是设备级独占，故叫 DeviceClaimed。
+// 现语义已厘清为「账号+设备」级，调度器据此按"今日已签"处理（OK=true）。
 func (e *ErrCheckinAlreadyClaimed) IsDeviceClaimed() bool { return true }
 
-// IsCheckinAlreadyClaimed 报告错误是否为「本设备今日额度已被领走」。
+// IsCheckinAlreadyClaimed 报告错误是否为「该账号今日已领」。
 func IsCheckinAlreadyClaimed(err error) bool {
 	if err == nil {
 		return false
