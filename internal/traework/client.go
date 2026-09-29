@@ -442,16 +442,24 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 
 // UserEntUsage 查询 TraeWork 账号的**剩余**可用积分。
 //
-// 修订记录（修复「显示 4050 但实际只有 310」）：
-// 原实现把所有权益包的 `quota.credits_limit` **累加**后作为剩余积分返回，
-// 这是错的——`credits_limit` 是**额度上限**（发放总量），不是剩余量：
-//   1) 未减去已用量，导致明显虚高
-//   2) 多个权益包（签到礼包/试用/活动）累加，数字进一步膨胀
-//   3) 上限会随发放变化，与"当前能用多少"无关
+// 修订记录：
 //
-// TraeWork 的积分可能来自两处，按可靠性依次尝试：
-//   ① entitlements 里带 usage 明细的余额字段（优先）
-//   ② checkin/status 的 credits 字段（该接口返回"当前可用积分"语义）
+//	v0.5.1 修复「显示 4050 但实际只有 310」
+//	  原实现把所有权益包的 `quota.credits_limit` **累加**后当剩余积分返回。
+//	  `credits_limit` 是**额度上限**（发放总量），不是剩余量：
+//	    1) 未减去已用量，导致虚高
+//	    2) 多个权益包（签到礼包/试用/活动）累加，数字进一步膨胀
+//	    3) 上限随发放变化，与"当前能用多少"无关
+//
+//	v0.5.2 修复「显示 150 也不对」（v0.5.1 引入的回退缺陷）
+//	  v0.5.1 在权益包解析不出余额时，回退读取 checkin/status 的 `credits` 字段，
+//	  并假定其语义是"当前可用积分"。**该假定是错的**：
+//	  `credits` 在 16 次采样中恒为 150，不随天数/消耗变化——它是**签到奖励固定值**
+//	  （对照 WorkBuddy 的 remain 有 2100/2200/2300/2400/2500 五种值，那才是真余额）。
+//	  用固定值冒充余额，比返回错误更糟：会让「优先积分」策略把账号当成恒定满额。
+//
+//	  现在：**只认权益包里的真实余额**。解析不出就返回错误，绝不用其它接口的
+//	  近似字段顶替。面板会显示"不可用"，这比显示一个假数字诚实。
 //
 // 同时把原始响应的 key 结构写入日志，便于确认真实字段名（一次刷新即可定位）。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
@@ -477,33 +485,91 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 		return v, nil
 	}
 
-	// 兜底：退回 checkin/status 的 credits（该接口语义为当前可用积分）。
-	if _, credits, _, err := c.CheckinStatus(a); err == nil {
-		log.Printf("traework credits uid=%s source=checkin_status remain=%d", a.UID, credits)
-		return credits, nil
-	} else {
-		log.Printf("traework credits uid=%s checkin_status fallback failed err=%v", a.UID, err)
-	}
+	// 解析失败：把权益包里所有**数值型**字段及其路径单独再打一遍。
+	// shape 日志有 40 条上限，若响应字段很多可能截断；这里只挑数值字段，
+	// 数量少、信息密度高——真实余额字段几乎必然是数值型。
+	logBalanceCandidates(a.UID, raw)
+
+	// 不再回退到 checkin/status（其 credits 是签到奖励值，非余额）。
+	// 明确失败，让面板显示"积分不可用"，避免用假数字误导选号策略。
+	log.Printf("traework credits uid=%s no remaining-credit field; checkin/status NOT used as fallback (its credits is a fixed checkin reward, not balance)", a.UID)
 	return 0, fmt.Errorf("ent usage: no usable remaining-credit field in response")
 }
 
-// remainFieldNames 可能表示"剩余积分"的字段名（按优先级）。
+// logBalanceCandidates 在解析失败时，打印权益包里全部数值型字段的路径与值。
+//
+// 目的：让用户刷新一次就能把真实字段名反馈回来。只打数值字段，
+// 不含 token/uid 等敏感信息，也不会因为响应字段多而被截断。
+func logBalanceCandidates(uid string, raw map[string]any) {
+	packs := findPackList(raw)
+	if len(packs) == 0 {
+		log.Printf("traework credits uid=%s balance-candidates: <未找到权益包数组>", uid)
+		return
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i, pack := range packs {
+		flat := map[string]any{}
+		flattenInto(pack, flat, 0)
+		keys := make([]string, 0, len(flat))
+		for k := range flat {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			n, ok := toInt64(flat[k])
+			if !ok {
+				continue
+			}
+			entry := fmt.Sprintf("pack%d.%s=%d", i, k, n)
+			if !seen[entry] {
+				seen[entry] = true
+				out = append(out, entry)
+			}
+		}
+	}
+	if len(out) == 0 {
+		log.Printf("traework credits uid=%s balance-candidates: <权益包内无数值字段>", uid)
+		return
+	}
+	sort.Strings(out)
+	log.Printf("traework credits uid=%s balance-candidates: %s", uid, strings.Join(out, " "))
+}
+
+// 字段名清单按**特异性从高到低**排列，先命中的优先。
+//
+// 采用扁平 key 精确匹配（flattenInto 已统一转小写），所以不用考虑大小写，
+// 但要警惕**过于宽泛**的字段名——它们会误匹配到无关的同名字段：
+//   - "credits" 单独出现时，既可能是"剩余"也可能是"发放总量"，语义不定，故
+//     只在最末位候补，且必须与 limit/used 同现时才参与计算
+//   - "available" / "balance" 在部分上游里表示"可提现余额"而非"积分余额"，
+//     排在具体名称之后
 var remainFieldNames = []string{
-	"credits_remain", "credit_remain", "remain_credits", "remain",
-	"credits_available", "available_credits", "available",
-	"balance", "credits_balance", "surplus",
+	// 最明确：带 credits/credit 前缀且含 remain
+	"credits_remain", "credit_remain", "remain_credits",
+	// 较明确
+	"credits_available", "available_credits", "credits_balance", "credits_surplus",
+	// 宽泛（可能与其它业务字段重名），放最后
+	"remain", "available", "balance", "surplus",
 }
 
 // usedFieldNames 可能表示"已用积分"的字段名。
 var usedFieldNames = []string{
-	"credits_used", "credit_used", "used_credits", "used",
-	"credits_consume", "consume", "cost",
+	"credits_used", "credit_used", "used_credits",
+	"credits_consume", "credit_consume", "credits_cost",
+	"used", "consume", "cost",
 }
 
 // limitFieldNames 可能表示"额度上限"的字段名（**不可**直接当剩余量）。
+//
+// 刻意**不收录**裸 "credits" / "total" / "quota" 这类宽泛名：
+//   - "credits" 单独出现时语义不定（可能是签到奖励值，实测恒为 150）
+//   - "quota" 通常是**容器对象**而非标量，收进来只会在 toInt64 时失败
+//   - "total" 太泛，可能命中"总记录数"之类的分页字段
+// 宁可少认字段、把包判为"解析失败"，也不要认错字段得出一个假余额。
 var limitFieldNames = []string{
-	"credits_limit", "credit_limit", "limit_credits", "limit",
-	"credits_total", "total_credits", "quota", "credits",
+	"credits_limit", "credit_limit", "limit_credits",
+	"credits_total", "credit_total", "total_credits",
 }
 
 // sumRemainFromEntitlements 从权益包里求"剩余积分"之和。
@@ -511,9 +577,13 @@ var limitFieldNames = []string{
 // 对每个权益包：
 //   - 优先取明确的"剩余"字段
 //   - 否则用 上限 - 已用 计算
-//   - 两者都没有则该包跳过（**不再**把纯上限当余额）
+//   - 两者都没有则该包 **解析失败**
 //
 // 返回 (总值, 是否至少命中一个包)。
+//
+// 注意第二个返回值的语义：它是"是否至少有一个包提供了可信的剩余量"，
+// 而不是"是否找到了权益包"。若全部包都解析不出，返回 false 让调用方失败，
+// 而不是返回一个 0 或残缺的和——残缺的和会让用户以为余额变少了。
 func sumRemainFromEntitlements(raw map[string]any) (int64, bool) {
 	packs := findPackList(raw)
 	if len(packs) == 0 {
@@ -521,14 +591,17 @@ func sumRemainFromEntitlements(raw map[string]any) (int64, bool) {
 	}
 	var total int64
 	hit := false
-	for _, pack := range packs {
+	for i, pack := range packs {
 		bal := extractBalance(pack)
 		if bal == nil {
+			// 记下是哪个包解析失败，方便对照 shape 日志定位字段名
+			if v, ok := pack["entitlement_base_info"]; ok {
+				_ = v
+			}
+			log.Printf("traework ent pack[%d] skipped: no remain/limit-used fields", i)
 			continue
 		}
-		if *bal > 0 {
-			total += *bal
-		}
+		total += *bal
 		hit = true
 	}
 	return total, hit

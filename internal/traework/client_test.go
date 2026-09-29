@@ -374,19 +374,86 @@ func TestUserResourceClampsNegative(t *testing.T) {
 }
 
 // ent_usage 无可用字段时应回退到 checkin/status 的 credits。
-func TestUserResourceFallsBackToCheckinStatus(t *testing.T) {
+// 回归：解析不出余额时**不得**回退到 checkin/status 的 credits。
+//
+// 这是 v0.5.1 引入的缺陷：checkin/status 的 credits 实测恒为 150（签到奖励固定值），
+// 拿它冒充余额会让面板显示 150，并让「优先积分」策略把账号当成恒定满额。
+// 现在要求明确失败（返回 error），由调用方把该账号积分标为不可用。
+func TestUserResourceDoesNotFallBackToCheckinStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EpEntUsage:
-			// 没有任何余额/用量字段
+			// 只有上限，没有任何剩余/已用字段 → 无法判断余额
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
 				{"entitlement_base_info":{"quota":{"credits_limit":4000}}}
 			]}`))
 		case EpCheckinStatus:
-			_, _ = w.Write([]byte(`{"checked_in":false,"credits":310,"enable":true}`))
+			// 即使这里有值，也不允许被采用
+			_, _ = w.Write([]byte(`{"checked_in":false,"credits":150,"enable":true}`))
 		default:
 			http.NotFound(w, r)
 		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatalf("解析不出余额时必须报错，却返回了 remain=%d（疑似采用了 checkin credits）", got)
+	}
+	if got != 0 {
+		t.Fatalf("出错时 remain 应为 0，得到 %d", got)
+	}
+}
+
+// 回归：裸 "credits" 字段不得被当作余额。
+// 实测该字段恒为 150，是签到奖励值而非余额。
+func TestUserResourceIgnoresBareCreditsField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits":150}}}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatalf("裸 credits=150 不得当余额，却返回 remain=%d", got)
+	}
+}
+
+// 回归：裸 "credits" 与 "used" 同现时也不得做减法。
+// 二者语义都不确定，做减法同样可能得出假余额。
+func TestUserResourceIgnoresBareCreditsMinusUsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits":500,"used":400}}}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatalf("裸 credits/used 不得做减法，却返回 remain=%d", got)
+	}
+}
+
+// 部分包可解析、部分不可解析时：只要有一个包给出可信余额就采用，
+// 不可解析的包被跳过（而不是当成 0 参与求和，那会虚低）。
+func TestUserResourceSkipsUnparsablePacks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits_limit":4000}}},
+			{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_remain":310}}}
+		]}`))
 	}))
 	defer srv.Close()
 
@@ -398,7 +465,7 @@ func TestUserResourceFallsBackToCheckinStatus(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	if got != 310 {
-		t.Fatalf("remain=%d want 310 (from checkin status)", got)
+		t.Fatalf("remain=%d want 310（第一个包跳过，不参与求和）", got)
 	}
 }
 
@@ -410,9 +477,10 @@ func TestUserResourceTolerantFieldNames(t *testing.T) {
 		want int64
 	}{
 		{"嵌套 data 包装", `{"data":{"entitlement_pack_list":[{"quota":{"credits_limit":500,"credits_remain":77}}]}}`, 77},
-		{"available 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"available":88}}}]}`, 88},
-		{"balance 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"balance":99}}}]}`, 99},
+		{"credits_available 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_available":88}}}]}`, 88},
+		{"credits_balance 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_balance":99}}}]}`, 99},
 		{"used 命名变体", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"used":400}}}]}`, 100},
+		{"复数包装 result", `{"result":{"pack_list":[{"quota":{"credits_limit":900,"credits_remain":123}}]}}`, 123},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
