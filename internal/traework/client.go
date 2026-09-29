@@ -318,7 +318,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 
 	var lastMsg string
 	for attempt := 0; attempt < maxTry; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
+		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
 		if err != nil {
 			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
 			return err

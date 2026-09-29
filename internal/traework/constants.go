@@ -29,3 +29,10 @@ const (
 )
 
 const DefaultConfigName = "glm-5.2"
+
+// CheckinClaimBody 签到 claim 接口的请求体。
+//
+// **不可用空对象 `{}`** —— 多个独立实现一致确认：空请求体会被服务端拒为 9074
+// （与设备号校验失败共用同一业务码，文案都是"当前用户太多"，极易误判）。
+// 必须与桌面端一致地带上 req_source。
+const CheckinClaimBody = `{"req_source":1}`

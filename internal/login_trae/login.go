@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,8 +46,22 @@ type state struct {
 func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 
 // Start 启动本地一次性回调监听，返回 Trae 授权 URL。
+//
+// 设备号策略：**优先取本机 TraeWork 客户端真实注册的设备号**。
+//
+// 原因：服务端按「注册指纹」校验 device id。随机生成的 16 位数字不被认作
+// 注册设备，签到 claim 会恒返回 9074（文案「当前用户太多」是误导，实为设备校验失败）。
+// 实测：同账号同时刻只改设备号，随机值→9074、客户端真实值→9095（通过）。
+// 详见 device.go 的说明。
 func Start(client *http.Client, statePath string) (string, error) {
-	machineID, deviceID := randHex(16), randHex(16)
+	machineID := randHex(16)
+	deviceID := ReadClientDeviceID()
+	if deviceID == "" {
+		// 没有客户端设备号时回退随机值。此时签到很可能失败（9074），
+		// 但其它功能（积分查询、API 代理）仍可正常使用。
+		deviceID = randHex(16)
+		log.Printf("traework device: 未取到客户端设备号，回退随机值；签到可能因设备校验失败")
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
