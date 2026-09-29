@@ -142,6 +142,9 @@ function renderAccounts() {
       </div>
       <div class="acct-row2">
         <span class="acct-status ${status.cls}">${esc(status.txt)}</span>
+        <button class="icon-checkin" data-action="checkin" data-uid="${esc(a.uid)}" title="单独签到此账号">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        </button>
         <button class="icon-del" data-action="remove" data-uid="${esc(a.uid)}" title="删除账号">
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
         </button>
@@ -438,6 +441,10 @@ function bind() {
     if (!btn) return;
     const uid = btn.dataset.uid;
     const action = btn.dataset.action;
+    if (action === "checkin") {
+      checkinOne(uid, btn);
+      return;
+    }
     if (action === "remove") {
       const name = uid.length > 20 ? uid.slice(0, 20) + "…" : uid;
       askConfirm("删除账号", "确定删除账号 " + name + "？\n（auth 文件将一并删除）", async () => {
@@ -447,6 +454,39 @@ function bind() {
       });
     }
   };
+
+  // checkinOne 单独签到某个账号。
+  // 按钮进入禁用+旋转态，避免重复点击；无论成败都在 finally 恢复。
+  async function checkinOne(uid, btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    const label = accountLabel(uid);
+    try {
+      const res = await Go.CheckinAccount(uid);
+      if (res && res.ok) {
+        toast(`${label} 签到成功` + (res.has_remain ? `，剩余 ${res.remain}` : ""));
+      } else if (res && res.retryable) {
+        // 上游高峰限流：不是失败，已安排自动重试
+        toast(`${label} 上游繁忙，已安排自动重试`);
+      } else {
+        toast(`${label} 签到失败：${(res && res.msg) || "未知错误"}`);
+      }
+    } catch (err) {
+      toast(`${label} 签到失败：${err && err.message ? err.message : err}`);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      load(); // 刷新状态（签到可能改变积分/冷却）
+    }
+  }
+
+  // accountLabel 取账号昵称用于提示文案（取不到则用 uid 前 8 位）。
+  function accountLabel(uid) {
+    const a = state && state.accounts ? state.accounts.find((x) => x.uid === uid) : null;
+    if (a && a.nickname) return a.nickname;
+    return uid.length > 8 ? uid.slice(0, 8) + "…" : uid;
+  }
 
   // 通用确认弹层（删除账号 / 关闭程序）
   const btnConfirmOk = $("btnConfirmOk");
