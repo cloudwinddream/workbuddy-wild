@@ -245,15 +245,18 @@ func TestCheckinClaimRetriesRateLimit(t *testing.T) {
 // 积分余额解析（修复「显示 4050 但实际只有 310」）
 // ---------------------------------------------------------------------------
 
-// 核心回归：credits_limit 是**额度上限**，绝不能被当作剩余积分。
-// 旧实现把所有包的 credits_limit 累加，导致 310 被显示成 4050。
+// 核心回归：`credits_limit` 是**额度上限**，绝不能直接当剩余积分。
+//
+// 历史病根（v0.5.0 及以前）：把各包 credits_limit 简单累加 → 显示 4050。
+// 正确做法是每包算 `上限 - 已用`（已用缺失按 0 计），本测试锁定这一算法。
 func TestUserResourceDoesNotTreatLimitAsRemain(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpEntUsage {
-			// 两个权益包，上限共 4500，但都没有 usage 明细 → 无法判断剩余
+		if r.URL.Path == EpCurrentEntList {
+			// 两个包：一个全用完（上限 4000、已用 4000），一个完全没用（上限 500）
+			// 正确剩余 = 0 + 500 = 500；若把上限直接累加会得到 4500（旧 bug）
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
-				{"entitlement_base_info":{"quota":{"credits_limit":4000}}},
-				{"entitlement_base_info":{"quota":{"credits_limit":500}}}
+				{"entitlement_base_info":{"quota":{"credits_limit":4000}},"usage":{"credits_amount":4000}},
+				{"entitlement_base_info":{"quota":{"credits_limit":500}},"usage":{}}
 			]}`))
 			return
 		}
@@ -264,17 +267,22 @@ func TestUserResourceDoesNotTreatLimitAsRemain(t *testing.T) {
 	c := New()
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
-	_, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
-	// 只有上限没有已用 → 必须报错，而不是返回 4500
-	if err == nil {
-		t.Fatal("只有 credits_limit 时不应把上限当余额返回")
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got == 4500 {
+		t.Fatal("把 credits_limit 直接累加当余额（旧 bug 复现）")
+	}
+	if got != 500 {
+		t.Fatalf("remain=%d want 500（4000-4000 + 500-0）", got)
 	}
 }
 
 // 有 remain 字段时直接用该字段。
 func TestUserResourcePrefersRemainField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpEntUsage {
+		if r.URL.Path == EpCurrentEntList {
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
 				{"entitlement_base_info":{"quota":{"credits_limit":4000,"credits_remain":310}}}
 			]}`))
@@ -299,7 +307,7 @@ func TestUserResourcePrefersRemainField(t *testing.T) {
 // 无 remain 字段时用 上限 - 已用 计算。
 func TestUserResourceComputesLimitMinusUsed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpEntUsage {
+		if r.URL.Path == EpCurrentEntList {
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
 				{"entitlement_base_info":{"quota":{"credits_limit":4000,"credits_used":3690}}}
 			]}`))
@@ -324,7 +332,7 @@ func TestUserResourceComputesLimitMinusUsed(t *testing.T) {
 // 多包时各自算剩余再求和，而不是把上限求和。
 func TestUserResourceSumsRemainAcrossPacks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpEntUsage {
+		if r.URL.Path == EpCurrentEntList {
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
 				{"entitlement_base_info":{"quota":{"credits_limit":1000,"credits_used":900}}},
 				{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_remain":210}}}
@@ -351,7 +359,7 @@ func TestUserResourceSumsRemainAcrossPacks(t *testing.T) {
 // 已用超过上限时应钳到 0，不返回负数。
 func TestUserResourceClampsNegative(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpEntUsage {
+		if r.URL.Path == EpCurrentEntList {
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
 				{"entitlement_base_info":{"quota":{"credits_limit":100,"credits_used":250}}}
 			]}`))
@@ -382,10 +390,11 @@ func TestUserResourceClampsNegative(t *testing.T) {
 func TestUserResourceDoesNotFallBackToCheckinStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case EpEntUsage:
-			// 只有上限，没有任何剩余/已用字段 → 无法判断余额
+		case EpCurrentEntList:
+			// 权益包里**没有任何额度信息**（无 credits_limit、无 usage）
+			// → 无法得出余额，必须报错，而不能去别的接口找数
 			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
-				{"entitlement_base_info":{"quota":{"credits_limit":4000}}}
+				{"entitlement_base_info":{"quota":{"no_bonus_quota":true}},"usage":{}}
 			]}`))
 		case EpCheckinStatus:
 			// 即使这里有值，也不允许被采用
@@ -448,10 +457,15 @@ func TestUserResourceIgnoresBareCreditsMinusUsed(t *testing.T) {
 
 // 部分包可解析、部分不可解析时：只要有一个包给出可信余额就采用，
 // 不可解析的包被跳过（而不是当成 0 参与求和，那会虚低）。
-func TestUserResourceSkipsUnparsablePacks(t *testing.T) {
+// 部分包缺少 usage 时：按"未使用"处理（剩余 = 上限），与有 usage 的包一起求和。
+//
+// 语义变更（v0.5.3）：`usage` 缺失或为 `{}` 表示**该包未被使用**，
+// 剩余即全额上限。此前 v0.5.1/v0.5.2 把它当成"无法判断"而跳过，
+// 导致余额虚低；实测真实响应里最新的签到包正是 `usage:{}`。
+func TestUserResourceTreatsMissingUsageAsUnused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
-			{"entitlement_base_info":{"quota":{"credits_limit":4000}}},
+			{"entitlement_base_info":{"quota":{"credits_limit":4000}},"usage":{}},
 			{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_remain":310}}}
 		]}`))
 	}))
@@ -464,8 +478,9 @@ func TestUserResourceSkipsUnparsablePacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if got != 310 {
-		t.Fatalf("remain=%d want 310（第一个包跳过，不参与求和）", got)
+	// 包0: 4000 - 0 = 4000；包1: 取 credits_remain = 310 → 合计 4310
+	if got != 4310 {
+		t.Fatalf("remain=%d want 4310（无 usage 的包按未使用计）", got)
 	}
 }
 

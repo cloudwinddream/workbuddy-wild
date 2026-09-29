@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"sort"
@@ -442,28 +443,35 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 
 // UserEntUsage 查询 TraeWork 账号的**剩余**可用积分。
 //
-// 修订记录：
+// 修订记录（真值口径经抓包确认）：
 //
 //	v0.5.1 修复「显示 4050 但实际只有 310」
 //	  原实现把所有权益包的 `quota.credits_limit` **累加**后当剩余积分返回。
-//	  `credits_limit` 是**额度上限**（发放总量），不是剩余量：
-//	    1) 未减去已用量，导致虚高
-//	    2) 多个权益包（签到礼包/试用/活动）累加，数字进一步膨胀
-//	    3) 上限随发放变化，与"当前能用多少"无关
+//	  `credits_limit` 是**额度上限**（发放总量），不是剩余量。
 //
 //	v0.5.2 修复「显示 150 也不对」（v0.5.1 引入的回退缺陷）
-//	  v0.5.1 在权益包解析不出余额时，回退读取 checkin/status 的 `credits` 字段，
-//	  并假定其语义是"当前可用积分"。**该假定是错的**：
-//	  `credits` 在 16 次采样中恒为 150，不随天数/消耗变化——它是**签到奖励固定值**
-//	  （对照 WorkBuddy 的 remain 有 2100/2200/2300/2400/2500 五种值，那才是真余额）。
-//	  用固定值冒充余额，比返回错误更糟：会让「优先积分」策略把账号当成恒定满额。
+//	  曾回退读取 checkin/status 的 `credits`，并误以为那是余额。
+//	  实测该字段恒为 150（签到奖励固定值），已彻底移除回退。
 //
-//	  现在：**只认权益包里的真实余额**。解析不出就返回错误，绝不用其它接口的
-//	  近似字段顶替。面板会显示"不可用"，这比显示一个假数字诚实。
+//	v0.5.3 改用**正确的接口与口径**（2026-09-29 抓包确认）
+//	  正确接口是 `user_current_entitlement_list`，不是 `ide_user_ent_usage`
+//	  （后者是 IDE 客户端专用，网页端不调用，字段口径也不同）。
 //
-// 同时把原始响应的 key 结构写入日志，便于确认真实字段名（一次刷新即可定位）。
+//	  响应里的 `usage_summary` 给出精确口径：
+//	    total_amount    = 4050   累计发放
+//	    consumed_amount = 3751.3 累计消耗
+//	    剩余 = 4050 - 3751.3 = 298.7  ← 与官网个人中心显示一致
+//
+//	  同一响应里逐包 (credits_limit - usage.credits_amount) 求和也得 298.7，
+//	  两者互为佐证。但**优先用 usage_summary**：它是上游算好的权威值，
+//	  不依赖各包字段是否齐全。
+//
+//	  注意 `usage` 为 `{}` 表示该包**未使用**（而非无法判断）——
+//	  这在 v0.5.1/v0.5.2 里被当成"解析失败"，是 150/不可用 问题的另一处根源。
+//
+// 返回值为整数（官网也是整数展示）；小数部分四舍五入。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCurrentEntList, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return 0, err
 	}
@@ -473,27 +481,59 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 		return 0, err
 	}
 
-	// 用 map 解析：字段名可能随上游调整，按候选列表逐个尝试，避免硬编码单一字段名。
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return 0, fmt.Errorf("ent usage parse: %w", err)
+		return 0, fmt.Errorf("entitlement list parse: %w", err)
 	}
-	logResourceShape(a.UID, raw)
 
+	// ① 首选：usage_summary.total_amount - consumed_amount（上游权威口径）
+	if total, used, ok := parseUsageSummary(raw); ok {
+		r := total - used
+		if r < 0 {
+			r = 0
+		}
+		log.Printf("traework credits uid=%s source=usage_summary total=%v consumed=%v remain=%v",
+			a.UID, total, used, r)
+		return int64(math.Round(r)), nil
+	}
+
+	// ② 兜底：逐包 (credits_limit - usage.credits_amount) 求和
 	if v, ok := sumRemainFromEntitlements(raw); ok {
-		log.Printf("traework credits uid=%s source=entitlements remain=%d", a.UID, v)
+		log.Printf("traework credits uid=%s source=entitlement_packs remain=%d", a.UID, v)
 		return v, nil
 	}
 
-	// 解析失败：把权益包里所有**数值型**字段及其路径单独再打一遍。
-	// shape 日志有 40 条上限，若响应字段很多可能截断；这里只挑数值字段，
-	// 数量少、信息密度高——真实余额字段几乎必然是数值型。
+	// 解析失败：打印结构，便于上游字段变更时定位
+	logResourceShape(a.UID, raw)
 	logBalanceCandidates(a.UID, raw)
+	log.Printf("traework credits uid=%s no usable balance in response", a.UID)
+	return 0, fmt.Errorf("entitlement list: no usable remaining-credit field in response")
+}
 
-	// 不再回退到 checkin/status（其 credits 是签到奖励值，非余额）。
-	// 明确失败，让面板显示"积分不可用"，避免用假数字误导选号策略。
-	log.Printf("traework credits uid=%s no remaining-credit field; checkin/status NOT used as fallback (its credits is a fixed checkin reward, not balance)", a.UID)
-	return 0, fmt.Errorf("ent usage: no usable remaining-credit field in response")
+// parseUsageSummary 读取 usage_summary{total_amount, consumed_amount}。
+//
+// 这是**权威口径**：上游已经算好的"发放总量"与"累计消耗"，剩余即二者之差。
+// 实测 `total_amount=4050, consumed_amount=3751.3` → 298.7，与官网一致。
+func parseUsageSummary(raw map[string]any) (total, consumed float64, ok bool) {
+	// 容错：summary 可能被包在 data/result 里
+	candidates := []map[string]any{raw}
+	for _, w := range []string{"data", "result", "Data", "Result"} {
+		if sub, isMap := raw[w].(map[string]any); isMap {
+			candidates = append(candidates, sub)
+		}
+	}
+	for _, c := range candidates {
+		sm, isMap := c["usage_summary"].(map[string]any)
+		if !isMap {
+			continue
+		}
+		t, tok := toFloat64(sm["total_amount"])
+		u, uok := toFloat64(sm["consumed_amount"])
+		if tok && uok {
+			return t, u, true
+		}
+	}
+	return 0, 0, false
 }
 
 // logBalanceCandidates 在解析失败时，打印权益包里全部数值型字段的路径与值。
@@ -554,8 +594,13 @@ var remainFieldNames = []string{
 }
 
 // usedFieldNames 可能表示"已用积分"的字段名。
+//
+// `credits_amount` 是**实测确认**的字段名：它出现在权益包的
+// `usage.credits_amount`，表示该包已消耗的积分。
+// 重要语义：`usage` 为 `{}`（空对象）表示**未使用**，即已用 = 0；
+// 若把它当成"无法判断"而跳过该包，会漏算该包的剩余额度。
 var usedFieldNames = []string{
-	"credits_used", "credit_used", "used_credits",
+	"credits_amount", "credits_used", "credit_used", "used_credits",
 	"credits_consume", "credit_consume", "credits_cost",
 	"used", "consume", "cost",
 }
@@ -647,13 +692,24 @@ func asMapList(v any) []map[string]any {
 }
 
 // extractBalance 从一个权益包里提取"剩余积分"。
-// 找不到任何余额/用量信息时返回 nil（表示无法判断，调用方跳过该包）。
+//
+// 真实结构（2026-09-29 抓包确认）：
+//
+//	{
+//	  "usage": {"credits_amount": 1.304},   ← 已用；usage 为 {} 表示未使用
+//	  "entitlement_base_info": {"quota": {"credits_limit": 150}}  ← 额度上限
+//	}
+//
+// 计算：剩余 = credits_limit - usage.credits_amount（缺省按 0 计）。
+//
+// 返回 nil 仅当**没有任何上限信息**（该包无法参与计算）。
+// 注意：有上限但无 usage 时**不是** nil，而是 剩余 = 上限（该包未被使用）。
 func extractBalance(pack map[string]any) *int64 {
-	// 递归收集该包里所有 key→值（含嵌套 quota / entitlement_base_info）
+	// 递归收集该包里所有 key→值（含嵌套 quota / entitlement_base_info / usage）
 	flat := map[string]any{}
 	flattenInto(pack, flat, 0)
 
-	// 1) 明确的"剩余"字段
+	// 1) 明确的"剩余"字段（若上游以后补充了该字段，优先采用）
 	for _, k := range remainFieldNames {
 		if v, ok := flat[k]; ok {
 			if n, ok := toInt64(v); ok {
@@ -661,8 +717,9 @@ func extractBalance(pack map[string]any) *int64 {
 			}
 		}
 	}
-	// 2) 上限 - 已用
-	var limit, used *int64
+
+	// 2) 上限 - 已用。没有上限则无法计算
+	var limit *int64
 	for _, k := range limitFieldNames {
 		if v, ok := flat[k]; ok {
 			if n, ok := toInt64(v); ok {
@@ -671,24 +728,26 @@ func extractBalance(pack map[string]any) *int64 {
 			}
 		}
 	}
+	if limit == nil {
+		return nil // 该包没有额度上限（如"免费"包），不参与积分计算
+	}
+
+	// 已用量：缺省为 0（usage 为 {} 或字段缺失都表示未使用）
+	var used int64
 	for _, k := range usedFieldNames {
 		if v, ok := flat[k]; ok {
 			if n, ok := toInt64(v); ok {
-				used = &n
+				used = n
 				break
 			}
 		}
 	}
-	if limit != nil && used != nil {
-		remain := *limit - *used
-		if remain < 0 {
-			remain = 0
-		}
-		return &remain
+
+	remain := *limit - used
+	if remain < 0 {
+		remain = 0
 	}
-	// 3) 只有上限没有已用 → 无法判断剩余，返回 nil
-	//    （这是本次修复的关键：旧实现直接拿上限当余额，导致虚高）
-	return nil
+	return &remain
 }
 
 // flattenInto 递归展开嵌套 map（深度上限 4，避免异常结构导致栈问题）。
@@ -718,6 +777,26 @@ func toInt64(v any) (int64, bool) {
 	case json.Number:
 		i, err := n.Int64()
 		return i, err == nil
+	}
+	return 0, false
+}
+
+// toFloat64 提取浮点值。
+// 积分口径里 total_amount / consumed_amount 都是小数（如 4050 与 3751.3），
+// 用 int64 会截断小数部分，导致剩余量偏差，因此单独提供浮点版本。
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
 	}
 	return 0, false
 }

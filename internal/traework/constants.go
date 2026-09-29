@@ -21,6 +21,11 @@ const (
 	EpCheckinStatus = "/trae/api/v2/ug/checkin_credits/status"
 	EpCheckinClaim  = "/trae/api/v2/ug/checkin_credits/claim"
 	EpEntUsage      = "/trae/api/v2/pay/ide_user_ent_usage"
+
+	// EpCurrentEntList 当前权益列表 —— 这是**唯一**能拿到真实「剩余积分」的接口。
+	// 它返回 usage_summary{total_amount, consumed_amount}，剩余 = total - consumed。
+	// （2026-09-29 抓包确认：4050 - 3751.3 = 298.7，与官网显示一致）
+	EpCurrentEntList = "/trae/api/v2/pay/user_current_entitlement_list"
 )
 
 const DefaultConfigName = "glm-5.2"
