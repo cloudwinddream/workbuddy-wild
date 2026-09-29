@@ -240,3 +240,196 @@ func TestCheckinClaimRetriesRateLimit(t *testing.T) {
 		t.Fatalf("claim calls=%d", calls.Load())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 积分余额解析（修复「显示 4050 但实际只有 310」）
+// ---------------------------------------------------------------------------
+
+// 核心回归：credits_limit 是**额度上限**，绝不能被当作剩余积分。
+// 旧实现把所有包的 credits_limit 累加，导致 310 被显示成 4050。
+func TestUserResourceDoesNotTreatLimitAsRemain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpEntUsage {
+			// 两个权益包，上限共 4500，但都没有 usage 明细 → 无法判断剩余
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":4000}}},
+				{"entitlement_base_info":{"quota":{"credits_limit":500}}}
+			]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	_, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	// 只有上限没有已用 → 必须报错，而不是返回 4500
+	if err == nil {
+		t.Fatal("只有 credits_limit 时不应把上限当余额返回")
+	}
+}
+
+// 有 remain 字段时直接用该字段。
+func TestUserResourcePrefersRemainField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpEntUsage {
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":4000,"credits_remain":310}}}
+			]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got != 310 {
+		t.Fatalf("remain=%d want 310", got)
+	}
+}
+
+// 无 remain 字段时用 上限 - 已用 计算。
+func TestUserResourceComputesLimitMinusUsed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpEntUsage {
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":4000,"credits_used":3690}}}
+			]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got != 310 {
+		t.Fatalf("remain=%d want 310 (4000-3690)", got)
+	}
+}
+
+// 多包时各自算剩余再求和，而不是把上限求和。
+func TestUserResourceSumsRemainAcrossPacks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpEntUsage {
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":1000,"credits_used":900}}},
+				{"entitlement_base_info":{"quota":{"credits_limit":500,"credits_remain":210}}}
+			]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	// (1000-900) + 210 = 310
+	if got != 310 {
+		t.Fatalf("remain=%d want 310", got)
+	}
+}
+
+// 已用超过上限时应钳到 0，不返回负数。
+func TestUserResourceClampsNegative(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpEntUsage {
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":100,"credits_used":250}}}
+			]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got != 0 {
+		t.Fatalf("remain=%d want 0 (clamped)", got)
+	}
+}
+
+// ent_usage 无可用字段时应回退到 checkin/status 的 credits。
+func TestUserResourceFallsBackToCheckinStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpEntUsage:
+			// 没有任何余额/用量字段
+			_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":4000}}}
+			]}`))
+		case EpCheckinStatus:
+			_, _ = w.Write([]byte(`{"checked_in":false,"credits":310,"enable":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got != 310 {
+		t.Fatalf("remain=%d want 310 (from checkin status)", got)
+	}
+}
+
+// 字段名容错：嵌套包装与不同命名都应能解析。
+func TestUserResourceTolerantFieldNames(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{"嵌套 data 包装", `{"data":{"entitlement_pack_list":[{"quota":{"credits_limit":500,"credits_remain":77}}]}}`, 77},
+		{"available 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"available":88}}}]}`, 88},
+		{"balance 命名", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"balance":99}}}]}`, 99},
+		{"used 命名变体", `{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":500,"used":400}}}]}`, 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := New()
+			c.HTTP = srv.Client()
+			c.UgHost = srv.URL
+			got, err := c.UserEntUsage(&auth.Auth{AccessToken: "at"})
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("remain=%d want %d", got, tc.want)
+			}
+		})
+	}
+}

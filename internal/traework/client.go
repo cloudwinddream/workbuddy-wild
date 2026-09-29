@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -439,6 +440,20 @@ func checkinResponseMessage(message, msg string) string {
 
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c.UserEntUsage(a) }
 
+// UserEntUsage 查询 TraeWork 账号的**剩余**可用积分。
+//
+// 修订记录（修复「显示 4050 但实际只有 310」）：
+// 原实现把所有权益包的 `quota.credits_limit` **累加**后作为剩余积分返回，
+// 这是错的——`credits_limit` 是**额度上限**（发放总量），不是剩余量：
+//   1) 未减去已用量，导致明显虚高
+//   2) 多个权益包（签到礼包/试用/活动）累加，数字进一步膨胀
+//   3) 上限会随发放变化，与"当前能用多少"无关
+//
+// TraeWork 的积分可能来自两处，按可靠性依次尝试：
+//   ① entitlements 里带 usage 明细的余额字段（优先）
+//   ② checkin/status 的 credits 字段（该接口返回"当前可用积分"语义）
+//
+// 同时把原始响应的 key 结构写入日志，便于确认真实字段名（一次刷新即可定位）。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -449,22 +464,253 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	var resp struct {
-		UserEntitlementPackList []struct {
-			EntitlementBaseInfo struct {
-				Quota struct {
-					CreditsLimit int64 `json:"credits_limit"`
-				} `json:"quota"`
-			} `json:"entitlement_base_info"`
-		} `json:"user_entitlement_pack_list"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
+
+	// 用 map 解析：字段名可能随上游调整，按候选列表逐个尝试，避免硬编码单一字段名。
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return 0, fmt.Errorf("ent usage parse: %w", err)
 	}
-	for _, p := range resp.UserEntitlementPackList {
-		remain += p.EntitlementBaseInfo.Quota.CreditsLimit
+	logResourceShape(a.UID, raw)
+
+	if v, ok := sumRemainFromEntitlements(raw); ok {
+		log.Printf("traework credits uid=%s source=entitlements remain=%d", a.UID, v)
+		return v, nil
 	}
-	return remain, nil
+
+	// 兜底：退回 checkin/status 的 credits（该接口语义为当前可用积分）。
+	if _, credits, _, err := c.CheckinStatus(a); err == nil {
+		log.Printf("traework credits uid=%s source=checkin_status remain=%d", a.UID, credits)
+		return credits, nil
+	} else {
+		log.Printf("traework credits uid=%s checkin_status fallback failed err=%v", a.UID, err)
+	}
+	return 0, fmt.Errorf("ent usage: no usable remaining-credit field in response")
+}
+
+// remainFieldNames 可能表示"剩余积分"的字段名（按优先级）。
+var remainFieldNames = []string{
+	"credits_remain", "credit_remain", "remain_credits", "remain",
+	"credits_available", "available_credits", "available",
+	"balance", "credits_balance", "surplus",
+}
+
+// usedFieldNames 可能表示"已用积分"的字段名。
+var usedFieldNames = []string{
+	"credits_used", "credit_used", "used_credits", "used",
+	"credits_consume", "consume", "cost",
+}
+
+// limitFieldNames 可能表示"额度上限"的字段名（**不可**直接当剩余量）。
+var limitFieldNames = []string{
+	"credits_limit", "credit_limit", "limit_credits", "limit",
+	"credits_total", "total_credits", "quota", "credits",
+}
+
+// sumRemainFromEntitlements 从权益包里求"剩余积分"之和。
+//
+// 对每个权益包：
+//   - 优先取明确的"剩余"字段
+//   - 否则用 上限 - 已用 计算
+//   - 两者都没有则该包跳过（**不再**把纯上限当余额）
+//
+// 返回 (总值, 是否至少命中一个包)。
+func sumRemainFromEntitlements(raw map[string]any) (int64, bool) {
+	packs := findPackList(raw)
+	if len(packs) == 0 {
+		return 0, false
+	}
+	var total int64
+	hit := false
+	for _, pack := range packs {
+		bal := extractBalance(pack)
+		if bal == nil {
+			continue
+		}
+		if *bal > 0 {
+			total += *bal
+		}
+		hit = true
+	}
+	return total, hit
+}
+
+// findPackList 在响应里定位权益包数组（字段名容错：多层级候选）。
+func findPackList(raw map[string]any) []map[string]any {
+	candidates := []string{
+		"user_entitlement_pack_list", "entitlement_pack_list",
+		"user_entitlement_packs", "pack_list", "packs",
+	}
+	// 先看顶层
+	for _, key := range candidates {
+		if v, ok := raw[key]; ok {
+			if list := asMapList(v); len(list) > 0 {
+				return list
+			}
+		}
+	}
+	// 再递归一层（常见包装：data / result / {"data":{"..."}}）
+	for _, wrapper := range []string{"data", "result", "Result", "Data", "response", "Response"} {
+		if sub, ok := raw[wrapper].(map[string]any); ok {
+			if list := findPackList(sub); len(list) > 0 {
+				return list
+			}
+		}
+	}
+	return nil
+}
+
+func asMapList(v any) []map[string]any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(arr))
+	for _, it := range arr {
+		if m, ok := it.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// extractBalance 从一个权益包里提取"剩余积分"。
+// 找不到任何余额/用量信息时返回 nil（表示无法判断，调用方跳过该包）。
+func extractBalance(pack map[string]any) *int64 {
+	// 递归收集该包里所有 key→值（含嵌套 quota / entitlement_base_info）
+	flat := map[string]any{}
+	flattenInto(pack, flat, 0)
+
+	// 1) 明确的"剩余"字段
+	for _, k := range remainFieldNames {
+		if v, ok := flat[k]; ok {
+			if n, ok := toInt64(v); ok {
+				return &n
+			}
+		}
+	}
+	// 2) 上限 - 已用
+	var limit, used *int64
+	for _, k := range limitFieldNames {
+		if v, ok := flat[k]; ok {
+			if n, ok := toInt64(v); ok {
+				limit = &n
+				break
+			}
+		}
+	}
+	for _, k := range usedFieldNames {
+		if v, ok := flat[k]; ok {
+			if n, ok := toInt64(v); ok {
+				used = &n
+				break
+			}
+		}
+	}
+	if limit != nil && used != nil {
+		remain := *limit - *used
+		if remain < 0 {
+			remain = 0
+		}
+		return &remain
+	}
+	// 3) 只有上限没有已用 → 无法判断剩余，返回 nil
+	//    （这是本次修复的关键：旧实现直接拿上限当余额，导致虚高）
+	return nil
+}
+
+// flattenInto 递归展开嵌套 map（深度上限 4，避免异常结构导致栈问题）。
+func flattenInto(m map[string]any, out map[string]any, depth int) {
+	if depth > 4 {
+		return
+	}
+	for k, v := range m {
+		lk := strings.ToLower(k)
+		if _, exists := out[lk]; !exists {
+			out[lk] = v
+		}
+		if sub, ok := v.(map[string]any); ok {
+			flattenInto(sub, out, depth+1)
+		}
+	}
+}
+
+func toInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return i, err == nil
+	}
+	return 0, false
+}
+
+// logResourceShape 打印 ent_usage 响应的字段结构（只打 key 与数值，不含 token）。
+//
+// 用于确认上游真实字段名：积分字段名一旦变化/新增，看这行日志即可定位。
+// 采用**扁平路径**输出（如 entitlement_base_info.quota.credits_remain=310），
+// 这样嵌套在哪一层、字段叫什么都能直接看出来，不受响应包装层数影响。
+func logResourceShape(uid string, raw map[string]any) {
+	pairs := make([]string, 0, 16)
+	collectShape(raw, "", &pairs, 0)
+	sort.Strings(pairs)
+	// 控制长度，避免超长响应刷爆日志
+	const maxPairs = 40
+	if len(pairs) > maxPairs {
+		pairs = append(pairs[:maxPairs], fmt.Sprintf("...(+%d)", len(pairs)-maxPairs))
+	}
+	log.Printf("traework ent_usage shape uid=%s %s", uid, strings.Join(pairs, " "))
+}
+
+// collectShape 递归收集 "路径=值" 对；只输出标量与非空容器摘要。
+// 深度上限放宽到 8：上游响应常有 data/result 多层包装，过浅会看不到 quota 层。
+func collectShape(v any, prefix string, out *[]string, depth int) {
+	const maxDepth = 8
+	if depth > maxDepth {
+		*out = append(*out, prefix+"=<max-depth>")
+		return
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			collectShape(t[k], p, out, depth+1)
+		}
+	case []any:
+		if len(t) == 0 {
+			*out = append(*out, prefix+"=[]")
+			return
+		}
+		*out = append(*out, fmt.Sprintf("%s.len=%d", prefix, len(t)))
+		// 展开前几个元素：单个包结构相同，但不同包的字段名可能不同
+		// （例如有的包给 credits_remain、有的只给 limit+used），
+		// 因此至少展开 3 个，确保能看出各包字段差异。
+		limit := len(t)
+		if limit > 3 {
+			limit = 3
+		}
+		for i := 0; i < limit; i++ {
+			collectShape(t[i], fmt.Sprintf("%s[%d]", prefix, i), out, depth+1)
+		}
+		if len(t) > limit {
+			*out = append(*out, fmt.Sprintf("%s[%d..]=<省略 %d 项>", prefix, limit, len(t)-limit))
+		}
+	default:
+		// 标量：数值 / 字符串 / 布尔 / null
+		*out = append(*out, fmt.Sprintf("%s=%v", prefix, t))
+	}
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
