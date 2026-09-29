@@ -791,4 +791,80 @@ wails build -platform darwin/universal -skipbindings
 
 ---
 
+## 附：TraeWork 签到协议（**必读，踩坑重灾区**）
+
+### 端点
+
+| 用途 | 端点 | 说明 |
+|---|---|---|
+| 签到状态 | `POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/status` | 体 `{}`；读 `checked_in` / `did_checked_in` / `enable` |
+| 领取额度 | `POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim` | 体 `{"req_source":1}` |
+| 剩余积分 | `POST https://api.trae.cn/trae/api/v2/pay/user_current_entitlement_list` | 读 `usage_summary.total_amount - consumed_amount` |
+
+### 认证头
+
+`Authorization: Cloud-IDE-JWT <accessToken>`、`X-User-Region: CN`，
+**以及 `X-Device-Id: <客户端真实注册设备号>`**（关键，见下）。
+
+### 铁律 1：`X-Device-Id` 必须是客户端真实注册设备号
+
+服务端按「注册指纹」校验设备号，**随机值恒被拒**。
+
+真实设备号明文写在客户端 `storage.json` 的**键名**上：
+
+```
+C:\Users\<user>\AppData\Roaming\TRAE SOLO CN\User\globalStorage\storage.json
+  "iCubeAuthInfo://icube-dc:4484256452647802": { ... }
+                          ^^^^^^^^^^^^^^^^ 16 位纯数字 = 注册设备号
+```
+
+⚠️ **不要用** `telemetry.devDeviceId`（UUID 形式）—— 它不是注册设备号，
+用了会被更严格限流。
+
+2026-09-30 单变量实测（同账号、同 token，只改 `X-Device-Id`）：
+
+| `X-Device-Id` | 请求体 | 结果 |
+|---|---|---|
+| 随机 32 位 hex | `{"req_source":1}` | ❌ **9074** |
+| 客户端真实注册号 | `{"req_source":1}` | ✅ 成功 |
+| 随机 32 位 hex | `{}` | ✅ 成功 |
+| 客户端真实注册号 | `{}` | ✅ 成功（9095 今日已签） |
+
+→ **决定因素是设备号**。空请求体时服务端跳过设备校验（这一点曾误导过修复方向）；
+但桌面端的真实行为是带 `req_source`，所以两者都要对。
+
+多账号：扫描所有客户端数据目录，按序分配**不同**的真实设备号
+（`ListClientDeviceIDs` / `NextClientDeviceID`）。同一设备一天只能签一个账号。
+
+### 铁律 2：`did_checked_in` 才是签到成功标志，`checked_in` 不是
+
+签到成功的真实响应：
+
+```json
+{"checked_in": false, "did_checked_in": true, "credits": 100, "enable": true, "message": "success"}
+```
+
+- `did_checked_in` = **今天签到成功过** ← 用它做验证
+- `checked_in` = 用户当前是否处于签到会话，**对 API 调用方恒为 false**
+
+用 `checked_in` 验证会导致每次签到都被误判失败。
+
+### 铁律 3：9074 不是限流，重试无用
+
+`code: 9074` 的文案是「当前参与用户太多，请稍后再试」，**极具误导性**。
+它的真实含义是**设备未注册**。重试 N 次结果不变，只能换设备号。
+
+对应实现：`ErrCheckinRateLimited.IsRateLimited()` 返回 **false**，
+让调度器不再安排无效重试。**不要**给 9074 加指数退避。
+
+### 其它业务码
+
+| code | 含义 | 处理 |
+|---|---|---|
+| `0` | 成功 | 后置 status 验证 |
+| `9095` | 当前设备今日已签到 | 视为成功（幂等） |
+| `9074` | 设备未注册 | 报错并提示换真实设备号，**不重试** |
+
+---
+
 **安全红线**：不要在任何文档、聊天记录或日志中输出真实 access token / refresh token。测试令牌不要复用。

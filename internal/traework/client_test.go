@@ -7,14 +7,13 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 func TestDailyCheckinClaimsWhenNotCheckedIn(t *testing.T) {
 	var statusCalls, claimCalls atomic.Int32
-	var checked atomic.Bool
+	var didChecked atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Cloud-IDE-JWT at" || r.Header.Get("X-User-Region") != "CN" {
 			t.Errorf("missing Trae UG headers: auth=%q region=%q", r.Header.Get("Authorization"), r.Header.Get("X-User-Region"))
@@ -22,10 +21,13 @@ func TestDailyCheckinClaimsWhenNotCheckedIn(t *testing.T) {
 		switch r.URL.Path {
 		case EpCheckinStatus:
 			statusCalls.Add(1)
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"checked_in":%t,"credits":200,"enable":true}`, checked.Load())))
+			// 关键：checked_in 恒 false（API 调用的真实表现），
+			// 签到成功的标志是 did_checked_in。用 checked_in 做验证会永远误判失败。
+			_, _ = w.Write([]byte(fmt.Sprintf(
+				`{"checked_in":false,"did_checked_in":%t,"credits":200,"enable":true}`, didChecked.Load())))
 		case EpCheckinClaim:
 			claimCalls.Add(1)
-			checked.Store(true)
+			didChecked.Store(true)
 			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
 		default:
 			http.NotFound(w, r)
@@ -34,15 +36,78 @@ func TestDailyCheckinClaimsWhenNotCheckedIn(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	c.CheckinRetry = 0
-	c.CheckinMaxTry = 3
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
 	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at", DeviceID: "device"}); err != nil {
 		t.Fatalf("daily checkin: %v", err)
 	}
+	// status 调用 2 次（前置查询 + 后置验证），claim 1 次
 	if statusCalls.Load() != 2 || claimCalls.Load() != 1 {
 		t.Fatalf("status calls=%d claim calls=%d", statusCalls.Load(), claimCalls.Load())
+	}
+}
+
+// 回归（v0.5.5 之前的第二个 bug）：后置验证必须认 `did_checked_in`。
+//
+// 真实响应（2026-09-30 抓包）：签到成功后为
+//
+//	{"checked_in":false,"did_checked_in":true,"credits":100,...}
+//
+// `checked_in` 表示"用户当前处于已签到会话"，对 API 调用方恒为 false。
+// 旧实现只读 checked_in → 每次签到都被判失败。
+//
+// 本测试模拟：前置 status 报未签（checked_in=false, did_checked_in=false），
+// claim 成功，后置 status 才翻转 did_checked_in=true → 必须判成功。
+func TestDailyCheckinAcceptsDidCheckedIn(t *testing.T) {
+	var claimed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCheckinStatus:
+			// checked_in 始终 false；did_checked_in 只在 claim 之后变 true
+			_, _ = w.Write([]byte(fmt.Sprintf(
+				`{"checked_in":false,"did_checked_in":%t,"credits":100,"enable":true}`, claimed.Load())))
+		case EpCheckinClaim:
+			claimed.Store(true)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err != nil {
+		t.Fatalf("did_checked_in=true 时必须判成功，得到 err=%v", err)
+	}
+}
+
+// 前置 status 已报 did_checked_in=true 时应直接返回"已签到"，不再 claim。
+func TestDailyCheckinAlreadyDidCheckedIn(t *testing.T) {
+	var claimCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCheckinStatus:
+			_, _ = w.Write([]byte(`{"checked_in":false,"did_checked_in":true,"credits":100,"enable":true}`))
+		case EpCheckinClaim:
+			claimCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	err := c.DailyCheckin(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatal("已签到时必须返回错误（已签到），却成功了")
+	}
+	if claimCalls.Load() != 0 {
+		t.Fatalf("已签到时不应再 claim，claim calls=%d", claimCalls.Load())
 	}
 }
 
@@ -71,43 +136,11 @@ func TestDailyCheckinSkipsClaimWhenAlreadyCheckedIn(t *testing.T) {
 	}
 }
 
-func TestCheckinClaimBusinessError(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpCheckinClaim {
-			calls.Add(1)
-			_, _ = w.Write([]byte(`{"code":9074,"message":"operation too frequent"}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	c := New()
-	c.CheckinRetry = 0
-	c.CheckinMaxTry = 3
-	c.HTTP = srv.Client()
-	c.UgHost = srv.URL
-	err := c.CheckinClaim(&auth.Auth{AccessToken: "at"})
-	// 修复后：限流耗尽重试应返回**可重试类型**（不再退化为普通错误），
-	// 以便调度器识别为瞬时状态而非账号异常。
-	if err == nil {
-		t.Fatal("expected rate-limited error, got nil")
-	}
-	if !IsCheckinRateLimited(err) {
-		t.Fatalf("err=%v, want ErrCheckinRateLimited", err)
-	}
-	var rl *ErrCheckinRateLimited
-	if !errors.As(err, &rl) || rl.Attempts != 3 {
-		t.Fatalf("Attempts=%v, want 3", err)
-	}
-	if calls.Load() != 3 {
-		t.Fatalf("claim calls=%d, want 3 (CheckinMaxTry)", calls.Load())
-	}
-}
-
-// 限流持续时应重试到上限，而不是只试 1 次（修复前只重试 1 次导致高峰必失败）。
-func TestCheckinClaimRetriesUpToMaxTry(t *testing.T) {
+// 9074 现在被正确理解为**设备未注册**，因此：
+//  1. 立即返回 ErrCheckinRateLimited（不重试——重试永不成功）
+//  2. IsRateLimited() 返回 false，调度器不再安排无效的"稍后重试"
+//  3. 只调用 1 次 claim
+func TestCheckinClaimDeviceRejectedIsNotRateLimit(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == EpCheckinClaim {
@@ -120,48 +153,30 @@ func TestCheckinClaimRetriesUpToMaxTry(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	c.CheckinRetry = 0 // 测试中不真正等待
-	c.CheckinMaxTry = 5
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
-	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at"}); !IsCheckinRateLimited(err) {
-		t.Fatalf("err=%v, want rate limited", err)
+	err := c.CheckinClaim(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatal("expected ErrCheckinRateLimited, got nil")
 	}
-	if calls.Load() != 5 {
-		t.Fatalf("claim calls=%d, want 5", calls.Load())
+	if !IsCheckinRateLimited(err) {
+		t.Fatalf("err=%v, want ErrCheckinRateLimited", err)
+	}
+	var rl *ErrCheckinRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("errors.As failed for %v", err)
+	}
+	// 关键：必须报告"不可重试"，否则调度器会做无效重试
+	if rl.IsRateLimited() {
+		t.Fatal("9074 是设备未注册，必须 IsRateLimited()==false（重试无用）")
+	}
+	// 只调一次，不再做指数退避
+	if calls.Load() != 1 {
+		t.Fatalf("claim calls=%d, want 1（9074 不重试）", calls.Load())
 	}
 }
 
-// 中间某次成功后应立即返回 nil，不再继续重试。
-func TestCheckinClaimSucceedsMidRetry(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpCheckinClaim {
-			if calls.Add(1) < 3 {
-				_, _ = w.Write([]byte(`{"code":9074,"message":"busy"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	c := New()
-	c.CheckinRetry = 0
-	c.CheckinMaxTry = 5
-	c.HTTP = srv.Client()
-	c.UgHost = srv.URL
-	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at"}); err != nil {
-		t.Fatalf("want success at 3rd attempt, got %v", err)
-	}
-	if calls.Load() != 3 {
-		t.Fatalf("claim calls=%d, want 3", calls.Load())
-	}
-}
-
-// 非限流业务错误应立即失败，不浪费重试（避免把真错误当限流反复试）。
+// 非 9074 业务错误应立即失败，且不属于 9074 类型。
 func TestCheckinClaimNonRateLimitFailsFast(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,69 +190,43 @@ func TestCheckinClaimNonRateLimitFailsFast(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	c.CheckinRetry = 0
-	c.CheckinMaxTry = 5
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
 	err := c.CheckinClaim(&auth.Auth{AccessToken: "at"})
 	if err == nil || IsCheckinRateLimited(err) {
-		t.Fatalf("err=%v, want non-rate-limit error", err)
+		t.Fatalf("err=%v, want non-9074 error", err)
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("claim calls=%d, want 1 (fail fast)", calls.Load())
 	}
 }
 
-// backoffDelay 应随次数增长并带上限。
-func TestBackoffDelayGrowsAndCaps(t *testing.T) {
-	base := 8 * time.Second
-	var prev time.Duration
-	for i := 0; i < 6; i++ {
-		d := backoffDelay(base, i)
-		if d <= 0 {
-			t.Fatalf("attempt %d: delay=%v must be positive", i, d)
-		}
-		if d > 2*time.Minute+2*time.Minute/4+time.Second {
-			t.Fatalf("attempt %d: delay=%v exceeds cap", i, d)
-		}
-		if i > 0 && d < prev/4 {
-			// 抖动可能让相邻值波动，但不该出现数量级回退
-			t.Fatalf("attempt %d: delay=%v regressed from %v", i, d, prev)
-		}
-		prev = d
-	}
-	// 大 attempt 必须被封顶在 2min 附近（含 ±25% 抖动）
-	d := backoffDelay(base, 20)
-	if d < 90*time.Second || d > 150*time.Second {
-		t.Fatalf("attempt 20: delay=%v, want ~2min", d)
-	}
-}
-
-func TestCheckinClaimRetriesRateLimit(t *testing.T) {
-	var calls atomic.Int32
+// success 明确为 false 时报错。
+func TestCheckinClaimSuccessFalse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != EpCheckinClaim {
-			http.NotFound(w, r)
+		if r.URL.Path == EpCheckinClaim {
+			_, _ = w.Write([]byte(`{"code":0,"success":false,"message":"denied"}`))
 			return
 		}
-		if calls.Add(1) == 1 {
-			_, _ = w.Write([]byte(`{"code":9074,"message":"operation too frequent"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	c := New()
-	c.CheckinRetry = 0
-	c.CheckinMaxTry = 3
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
-	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at"}); err != nil {
-		t.Fatalf("retry claim: %v", err)
+	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at"}); err == nil {
+		t.Fatal("want error when success=false")
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("claim calls=%d", calls.Load())
+}
+
+// 9074 之外的其它 code 不得被当成 9074。
+func TestIsCheckinRateLimitedOnly9074(t *testing.T) {
+	if IsCheckinRateLimited(nil) {
+		t.Fatal("nil 不应是 9074")
+	}
+	if IsCheckinRateLimited(errors.New("checkin claim code=9095 msg=already")) {
+		t.Fatal("9095（今日已签）不应被当成 9074")
 	}
 }
 

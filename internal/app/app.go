@@ -33,7 +33,7 @@ import (
 // Version 面板展示的版本号。
 // 统一入口：打包时用 -ldflags "-X github.com/rockswang/workbuddy-wild/internal/app.Version=vX.Y.Z" 注入，
 // 与 wails.json 的 productVersion、README 保持一致（升级时三处同步）。
-var Version = "0.5.6"
+var Version = "0.5.7"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -780,7 +780,22 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	var authURL string
 	var err error
 	if k == provider.TraeWork {
-		authURL, err = logintrae.Start(a.loginClient, a.loginStateFP)
+		// 为本次登录挑选一个**客户端真实注册设备号**。
+		//
+		// 为什么：签到 claim 接口按设备校验，随机设备号恒被拒为 9074。
+		// 多账号时按已有 TraeWork 账号数轮转，尽量让每个账号分到不同的
+		// 真实设备号 —— 既保证服务端认可，又避开"同设备一天只能签一个账号"。
+		//
+		// 若本机没装 TraeWork 客户端（取不到任何真实设备号），这里传空，
+		// 由 Start 回退随机值；签到会失败但其余功能可用，日志会明确提示。
+		devIdx := a.traeAccountCount()
+		deviceID := logintrae.NextClientDeviceID(devIdx)
+		if deviceID == "" {
+			log.Printf("traework 登录：本机未发现客户端设备号，将回退随机值（签到会返回 9074）")
+		} else {
+			log.Printf("traework 登录：使用客户端真实设备号 %s…（第 %d 个账号）", deviceID[:6], devIdx+1)
+		}
+		authURL, err = logintrae.Start(a.loginClient, a.loginStateFP, deviceID)
 	} else {
 		authURL, err = login.Start(a.loginClient, a.loginStateFP)
 		if err == nil {
@@ -912,6 +927,14 @@ func (a *App) completeLogin(r login.Result) {
 		}
 		a.emitAccounts()
 	})
+}
+
+// traeAccountCount 返回当前已加载的 TraeWork 账号数，用于分配设备号下标。
+func (a *App) traeAccountCount() int {
+	if rt := a.runtime(provider.TraeWork); rt != nil && rt.Pool != nil {
+		return len(rt.Pool.List())
+	}
+	return 0
 }
 
 func (a *App) completeTraeLogin(r logintrae.Result) {

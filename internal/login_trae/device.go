@@ -63,6 +63,24 @@ func findClientStorageJSON() string {
 //
 // 返回 "" 表示本机没有可用的客户端设备号（未装客户端，或格式不符）。
 // 调用方应在这种情况下回退到随机值，并提示用户签到可能失败。
+//
+// ⚠️ 重要：多账号场景下**必须对每个账号用同一个真实设备号**。
+// 签到额度是按「设备」而非「账号」发放的（同一设备一天只能签一个账号），
+// 但重点在于**服务端是否认这个设备号**：
+//
+//	随机生成的 32 位 hex            → claim 恒返 9074（设备校验失败）
+//	客户端真实注册的 16 位数字       → claim 返 0 / 9095（成功或今日已签）
+//
+// 2026-09-30 单变量实测（同账号同 token，只改 X-Device-Id）：
+//
+//	5a4fc621c06a42300ba78afd67e74ad9 + {"req_source":1} → 9074
+//	4484256452647802                 + {"req_source":1} → 成功
+//	5a4fc621c06a42300ba78afd67e74ad9 + {}               → 成功
+//	4484256452647802                 + {}               → 成功（9095 今日已签）
+//
+// 注意最后两行：请求体为空时服务端**跳过**设备校验，所以"空体也成功"曾
+// 误导过前一轮修复。但带 `req_source` 才是桌面端的真实行为，因此设备号
+// 仍必须正确。两者都要对，不能只对其中一个。
 func ReadClientDeviceID() string {
 	p := findClientStorageJSON()
 	if p == "" {
@@ -79,7 +97,7 @@ func ReadClientDeviceID() string {
 	// （storage.json 体积可能很大，且格式随版本变化，正则更稳）。
 	if m := deviceIDKeyRe.FindSubmatch(data); len(m) == 2 {
 		id := string(m[1])
-		log.Printf("traework device: 从客户端读到真实设备号（%d 位，前缀 %s…）", len(id), id[:4])
+		log.Printf("traework device: 从客户端读到真实设备号（%d 位，前缀 %s…）src=%s", len(id), id[:4], p)
 		return id
 	}
 
@@ -88,10 +106,64 @@ func ReadClientDeviceID() string {
 	if err := json.Unmarshal(data, &raw); err == nil {
 		if v, ok := raw["deviceId"].(string); ok && strings.TrimSpace(v) != "" {
 			id := strings.TrimSpace(v)
-			log.Printf("traework device: 从 deviceId 字段读到设备号（%d 位）", len(id))
+			log.Printf("traework device: 从 deviceId 字段读到设备号（%d 位）src=%s", len(id), p)
 			return id
 		}
 	}
 	log.Printf("traework device: %s 中未找到 iCubeAuthInfo 设备号", p)
 	return ""
+}
+
+// ListClientDeviceIDs 返回本机所有可用的客户端注册设备号（去重，保持发现顺序）。
+//
+// 多账号用户常见做法是「装多个客户端实例，每个目录登一个账号」，此时每个
+// storage.json 里都有一个真实注册设备号。为每个账号分配一个**不同的真实设备号**
+// 既能让服务端通过校验，又能天然避开「同设备一天只能签一个账号」的限制。
+//
+// 返回空切片表示本机没有任何客户端设备号（此时调用方只能回退随机值，
+// 并应提示用户签到很可能失败）。
+func ListClientDeviceIDs() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, dir := range traeClientDirs() {
+		p := filepath.Join(dir, "storage.json")
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		m := deviceIDKeyRe.FindSubmatch(data)
+		if len(m) != 2 {
+			continue
+		}
+		id := string(m[1])
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		log.Printf("traework device: 发现客户端设备号 %s…（共 %d 个）src=%s", id[:4], len(out), p)
+	}
+	return out
+}
+
+// NextClientDeviceID 为第 idx 个账号挑一个设备号。
+//
+// 策略：优先按序号分配不同的真实设备号（idx < 可用数量时），
+// 超出数量后复用一个真实设备号——此时同设备只能签一个账号，
+// 但至少不会误报 9074（其余账号会拿到 9095「今日已签」，语义清晰）。
+//
+// 完全没有客户端设备号时返回 ""，由调用方回退。
+func NextClientDeviceID(idx int) string {
+	ids := ListClientDeviceIDs()
+	if len(ids) == 0 {
+		return ""
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	return ids[idx%len(ids)]
 }

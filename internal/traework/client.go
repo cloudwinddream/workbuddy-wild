@@ -8,7 +8,7 @@ import (
 	"io"
 	"log"
 	"math"
-	"math/rand"
+
 	"net/http"
 	"sort"
 	"strings"
@@ -49,25 +49,40 @@ func Classify(status int, body string) provider.ErrKind {
 	return provider.ErrNone
 }
 
-// CheckinRateLimitCode TraeWork 签到限流业务码（"当前参与用户太多，请稍后再试"）。
+// CheckinRateLimitCode TraeWork 签到业务码 9074。
+//
+// ⚠️ 文案是"当前参与用户太多，请稍后再试"，**但它不是限流**。
+// 2026-09-30 单变量实测确认：9074 = **设备校验失败**。
+// 同一个账号、同一个 token，只改 X-Device-Id：
+//
+//	随机 32 位 hex + {"req_source":1} → 9074
+//	客户端真实注册号 + {"req_source":1} → 成功
+//
+// 因此**不要靠重试来"等高峰过去"**——重试再多次也不会成功，
+// 必须把账号里存的 deviceId 换成客户端真实注册设备号。
+// 保留此常量仅用于识别该错误并给出可操作的提示。
 const CheckinRateLimitCode = 9074
 
-// ErrCheckinRateLimited 签到在耗尽重试后仍被限流。
-// 这是一个**可重试**的瞬时错误，不是永久失败——调用方（调度器）应安排稍后重试，
-// 而不是把它当作账号异常（不应触发冷却或禁用）。
+// ErrCheckinRateLimited 签到业务码 9074。
+//
+// 历史包袱：v0.5.4 曾把它当"高峰限流"处理，安排指数退避重试。
+// 实测证明方向错误——重试永不成功。现在仍实现 IsRateLimited()（返回 false
+// 会被调度器当账号异常），但**语义已修正为"设备未注册"**，
+// 消息里直接告诉用户怎么修。
 type ErrCheckinRateLimited struct {
 	Attempts int
 	Msg      string
 }
 
 func (e *ErrCheckinRateLimited) Error() string {
-	return fmt.Sprintf("checkin rate limited after %d attempts: %s", e.Attempts, e.Msg)
+	return fmt.Sprintf("checkin 9074 (device not registered): %s", e.Msg)
 }
 
-// IsRateLimited 实现 scheduler 的 rateLimited 接口：标记为瞬时、可重试。
-func (e *ErrCheckinRateLimited) IsRateLimited() bool { return true }
+// IsRateLimited 返回 false：9074 不是限流，而是设备未注册（重试无用）。
+// 返回 false 让调度器不再安排"稍后自动重试"——那是个无效承诺。
+func (e *ErrCheckinRateLimited) IsRateLimited() bool { return false }
 
-// IsCheckinRateLimited 报告错误是否为签到限流（可重试）。
+// IsCheckinRateLimited 报告错误是否为签到 9074（设备未注册）。
 func IsCheckinRateLimited(err error) bool {
 	if err == nil {
 		return false
@@ -78,27 +93,23 @@ func IsCheckinRateLimited(err error) bool {
 
 // Client Trae SOLO 上游 HTTP 客户端。
 type Client struct {
-	HTTP          *http.Client
-	StreamHTTP    *http.Client
-	AgentHost     string
-	UgHost        string
-	OAuthHost     string
-	ClientID      string
-	CheckinRetry  time.Duration // 首次 9074 限流的等待基数；生产默认 8s
-	CheckinMaxTry int           // 9074 限流的最大尝试次数；默认 4
+	HTTP       *http.Client
+	StreamHTTP *http.Client
+	AgentHost  string
+	UgHost     string
+	OAuthHost  string
+	ClientID   string
 }
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
 	return &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		StreamHTTP:    &http.Client{Transport: tr},
-		AgentHost:     AgentHost,
-		UgHost:        UgHost,
-		OAuthHost:     OAuthHost,
-		ClientID:      ClientID,
-		CheckinRetry:  8 * time.Second,
-		CheckinMaxTry: 4,
+		HTTP:       &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		StreamHTTP: &http.Client{Transport: tr},
+		AgentHost:  AgentHost,
+		UgHost:     UgHost,
+		OAuthHost:  OAuthHost,
+		ClientID:   ClientID,
 	}
 }
 
@@ -258,144 +269,77 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	return out, nil
 }
 
-func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
+func (c *Client) CheckinStatusLegacyRemoved() {}
+
+// CheckinClaim 领取签到额度。
+//
+// 修订（2026-09-30，单变量实测确认）：
+//
+//	v0.5.4–v0.5.5 把 9074 当"高峰限流"，做 4 次指数退避重试（8s→16s→32s）。
+//	**方向错误**：9074 的真正含义是"设备号未被服务端认作注册设备"，
+//	重试再多次也不会成功（实测连续重试恒返 9074）。
+//
+//	现在的做法：**不重试**，一次调用直接判定。
+//	  9074     → 返回 *ErrCheckinRateLimited（文案说明要换真实设备号）
+//	  0 / 9095 → 成功（9095 表示今日已签，由后置 status 验证兜底）
+//
+// 这样单账号签到耗时从最坏 ~60s 降到 ~1s，且不再给出"稍后自动重试"的空头承诺。
+func (c *Client) CheckinClaim(a *auth.Auth) error {
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
 	if err != nil {
-		return false, 0, false, err
+		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	UgHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
-		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
-		return false, 0, false, err
+		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+		return err
 	}
-	var resp struct {
-		CheckedIn bool   `json:"checked_in"`
-		Credits   int64  `json:"credits"`
-		Enable    bool   `json:"enable"`
-		Code      int    `json:"code"`
-		Message   string `json:"message"`
-		Msg       string `json:"msg"`
-		Success   *bool  `json:"success"`
+	code, msg, success, err := parseCheckinResponse(data)
+	if err != nil {
+		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+		return err
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		err = fmt.Errorf("checkin status parse: %w", err)
-		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
-		return false, 0, false, err
+
+	if code == CheckinRateLimitCode {
+		log.Printf("traework checkin claim device-rejected uid=%s code=%d device=%s（设备号未被认可，重试无用）",
+			a.UID, code, shortDevice(a.DeviceID))
+		return &ErrCheckinRateLimited{Attempts: 1, Msg: msg}
 	}
-	if resp.Code != 0 {
-		err := fmt.Errorf("checkin status code=%d msg=%s", resp.Code, checkinResponseMessage(resp.Message, resp.Msg))
-		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
-		return false, 0, false, err
+	if code != 0 {
+		err := fmt.Errorf("checkin claim code=%d msg=%s", code, msg)
+		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+		return err
 	}
-	if resp.Success != nil && !*resp.Success {
-		err := fmt.Errorf("checkin status failed: %s", checkinResponseMessage(resp.Message, resp.Msg))
-		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
-		return false, 0, false, err
+	if success != nil && !*success {
+		err := fmt.Errorf("checkin claim failed: %s", msg)
+		log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+		return err
 	}
-	log.Printf("traework checkin status uid=%s checked_in=%t credits=%d enable=%t", a.UID, resp.CheckedIn, resp.Credits, resp.Enable)
-	return resp.CheckedIn, resp.Credits, resp.Enable, nil
+	log.Printf("traework checkin claim response uid=%s code=%d msg=%s device=%s",
+		a.UID, code, msg, shortDevice(a.DeviceID))
+	return nil // 9095 等业务无害响应交给后置 status 验证最终状态
 }
 
-// CheckinClaim 领取签到额度。
-//
-// 上游在高峰时段会对 claim 接口返回业务码 9074（"当前参与用户太多，请稍后再试"），
-// 这是**瞬时**限流而非错误。原实现只重试 1 次（等待 8s 固定），在高峰时段几乎必然
-// 失败——实测连续 57 次签到全部因此失败。
-//
-// 现改为：最多 CheckinMaxTry 次尝试，等待时间按指数退避（base, 2×base, 4×base…）
-// 并叠加抖动，避免多账号同时重试再次撞上高峰。耗尽后返回 *ErrCheckinRateLimited，
-// 交由调度器安排稍后重试（而非判定账号异常）。
-func (c *Client) CheckinClaim(a *auth.Auth) error {
-	maxTry := c.CheckinMaxTry
-	if maxTry <= 0 {
-		maxTry = 4
+// shortDevice 只显示设备号前 6 位，避免日志泄漏完整指纹。
+func shortDevice(s string) string {
+	if len(s) <= 6 {
+		return s
 	}
-	base := c.CheckinRetry
-	if base <= 0 {
-		base = 8 * time.Second
-	}
-
-	var lastMsg string
-	for attempt := 0; attempt < maxTry; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
-		if err != nil {
-			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
-			return err
-		}
-		UgHeaders(req, a)
-		data, err := c.doJSON(req)
-		if err != nil {
-			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
-			return err
-		}
-		code, msg, success, err := parseCheckinResponse(data)
-		if err != nil {
-			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
-			return err
-		}
-		lastMsg = msg
-
-		// 9074 限流：非最后一次则退避等待后重试。
-		if code == CheckinRateLimitCode {
-			if attempt == maxTry-1 {
-				break // 耗尽重试，交由调度器稍后重试
-			}
-			delay := backoffDelay(base, attempt)
-			log.Printf("traework checkin claim rate-limited uid=%s code=%d attempt=%d/%d retry_after=%s",
-				a.UID, code, attempt+1, maxTry, delay)
-			time.Sleep(delay)
-			continue
-		}
-		if code != 0 {
-			err := fmt.Errorf("checkin claim code=%d msg=%s", code, msg)
-			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
-			return err
-		}
-		if success != nil && !*success {
-			err := fmt.Errorf("checkin claim failed: %s", msg)
-			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
-			return err
-		}
-		log.Printf("traework checkin claim response uid=%s code=%d msg=%s", a.UID, code, msg)
-		return nil // 9095 等业务无害响应交给后置 status 验证最终状态
-	}
-
-	log.Printf("traework checkin claim rate-limited-exhausted uid=%s attempts=%d last_msg=%s",
-		a.UID, maxTry, lastMsg)
-	return &ErrCheckinRateLimited{Attempts: maxTry, Msg: lastMsg}
-}
-
-// backoffDelay 计算第 attempt 次（0 基）重试的等待时间：
-// base × 2^attempt，叠加 ±25% 抖动，上限 2 分钟。
-// 抖动用于打散多账号的重试时刻，避免同步撞上同一波高峰。
-func backoffDelay(base time.Duration, attempt int) time.Duration {
-	const maxDelay = 2 * time.Minute
-	d := base
-	for i := 0; i < attempt; i++ {
-		d *= 2
-		if d >= maxDelay {
-			d = maxDelay
-			break
-		}
-	}
-	// ±25% 抖动
-	jitter := time.Duration(float64(d) * 0.25 * (rand.Float64()*2 - 1))
-	out := d + jitter
-	if out < time.Second {
-		out = time.Second
-	}
-	return out
+	return s[:6] + "…"
 }
 
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	log.Printf("traework checkin start uid=%s", a.UID)
-	checked, _, enable, err := c.CheckinStatus(a)
+	log.Printf("traework checkin start uid=%s device=%s", a.UID, shortDevice(a.DeviceID))
+	// 前置查询：checked_in 或 did_checked_in 任一为真都表示今天已签过。
+	// （did_checked_in 是"今天签成功过"，checked_in 是"当前处于签到会话"）
+	checked, did, _, enable, err := c.CheckinStatusFull(a)
 	if err != nil {
 		return err
 	}
-	if checked {
-		log.Printf("traework checkin already uid=%s", a.UID)
+	if checked || did {
+		log.Printf("traework checkin already uid=%s checked_in=%t did_checked_in=%t", a.UID, checked, did)
 		return fmt.Errorf("已签到")
 	}
 	if !enable {
@@ -406,17 +350,93 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	if err := c.CheckinClaim(a); err != nil {
 		return err
 	}
-	checked, _, _, err = c.CheckinStatus(a)
-	if err != nil {
-		return fmt.Errorf("checkin verification: %w", err)
-	}
-	if !checked {
-		err := fmt.Errorf("checkin verification failed: checked_in=false")
-		log.Printf("traework checkin failed uid=%s err=%v", a.UID, err)
+	// 后置验证：claim 返回 0 也可能实际未入账，必须查 status 确认。
+	if err := c.verifyCheckedIn(a); err != nil {
 		return err
 	}
 	log.Printf("traework checkin verified uid=%s", a.UID)
 	return nil
+}
+
+// verifyCheckedIn 轮询 status 直到 did_checked_in 为 true。
+//
+// ⚠️ 判定字段是 **did_checked_in**，不是 checked_in。
+// 实测（2026-09-30）签到成功后响应为：
+//
+//	{"checked_in":false, "did_checked_in":true, "credits":100, ...}
+//
+// `checked_in` 表示"用户当前是否处于已签到会话"（网页端进页面时才置真），
+// 对 API 调用方**恒为 false**。若用它做验证，每次签到都会误判为失败，
+// 并在调度器里触发无意义的重试。这是 v0.5.5 之前未被发现的第二个 bug。
+//
+// 加分项也兼容：可见积分字段（credits/extra_credits）由 status 正常返回。
+func (c *Client) verifyCheckedIn(a *auth.Auth) error {
+	const maxTry = 3
+	for attempt := 0; attempt < maxTry; attempt++ {
+		checked, did, _, _, err := c.CheckinStatusFull(a)
+		if err != nil {
+			return fmt.Errorf("checkin verification: %w", err)
+		}
+		if checked || did {
+			return nil
+		}
+		if attempt < maxTry-1 {
+			time.Sleep(1200 * time.Millisecond) // 上游入账有轻微延迟
+		}
+	}
+	err := fmt.Errorf("checkin verification failed: did_checked_in=false")
+	log.Printf("traework checkin failed uid=%s err=%v", a.UID, err)
+	return err
+}
+
+// CheckinStatus 查询签到状态（兼容旧签名）。
+func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
+	checked, _, credits, enable, err := c.CheckinStatusFull(a)
+	return checked, credits, enable, err
+}
+
+// CheckinStatusFull 查询签到状态，同时返回 did_checked_in。
+//
+// did_checked_in 才是"今天签到成功过"的可靠标志（见 verifyCheckedIn 说明）。
+func (c *Client) CheckinStatusFull(a *auth.Auth) (checkedIn, didCheckedIn bool, credits int64, enable bool, err error) {
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return false, false, 0, false, err
+	}
+	UgHeaders(req, a)
+	data, err := c.doJSON(req)
+	if err != nil {
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, false, 0, false, err
+	}
+	var resp struct {
+		CheckedIn    bool   `json:"checked_in"`
+		DidCheckedIn bool   `json:"did_checked_in"`
+		Credits      int64  `json:"credits"`
+		Enable       bool   `json:"enable"`
+		Code         int    `json:"code"`
+		Message      string `json:"message"`
+		Msg          string `json:"msg"`
+		Success      *bool  `json:"success"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		err = fmt.Errorf("checkin status parse: %w", err)
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, false, 0, false, err
+	}
+	if resp.Code != 0 {
+		err := fmt.Errorf("checkin status code=%d msg=%s", resp.Code, checkinResponseMessage(resp.Message, resp.Msg))
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, false, 0, false, err
+	}
+	if resp.Success != nil && !*resp.Success {
+		err := fmt.Errorf("checkin status failed: %s", checkinResponseMessage(resp.Message, resp.Msg))
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, false, 0, false, err
+	}
+	log.Printf("traework checkin status uid=%s checked_in=%t did_checked_in=%t credits=%d enable=%t",
+		a.UID, resp.CheckedIn, resp.DidCheckedIn, resp.Credits, resp.Enable)
+	return resp.CheckedIn, resp.DidCheckedIn, resp.Credits, resp.Enable, nil
 }
 
 func parseCheckinResponse(data []byte) (code int, msg string, success *bool, err error) {
