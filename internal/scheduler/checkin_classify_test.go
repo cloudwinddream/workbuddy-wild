@@ -142,3 +142,45 @@ func TestCheckinAlreadyClaimedIsIdempotentSuccess(t *testing.T) {
 		t.Fatalf("文案误导：%q（去重是账号级，不是设备级独占）", r.Msg)
 	}
 }
+
+// 多账号场景：每个账号各自有一份每日名额，互不影响。
+//
+// 证据链（2026-09-30 实测）：
+//   - 账号1 历史上连续 17 天每天签到成功 → 名额按天重置
+//   - 换任何设备号都不改变结果 → 去重按**账号**计，与设备号无关
+//   - 因此两个账号在同一天各自签一次，都应判定为"本次成功"
+//
+// 本测试锁定：A 账号已签（幂等成功）**不会**影响 B 账号的正常签到。
+func TestMultiAccountCheckinIndependent(t *testing.T) {
+	// 账号A：今日已签 → 幂等成功，OK=true，已签标记
+	fA := &stubUpstream{
+		checkinErr: &traework.ErrCheckinAlreadyClaimed{Msg: "今日已签到", Device: "4484…"},
+		remain:     4600,
+	}
+	p := pool.New("")
+	s := New(Config{Name: "traework", Pool: p, Upstream: fA})
+	p.Add(&auth.Auth{Kind: "traework", UID: "acctA", RefreshToken: "rt", AccessToken: "at",
+		ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
+
+	rA := s.checkinOne("acctA")
+	if !rA.OK || !rA.AlreadyChecked {
+		t.Fatalf("账号A 已签应为幂等成功: ok=%t already=%t", rA.OK, rA.AlreadyChecked)
+	}
+
+	// 账号B：同一个池、同一台设备，今天没签 → 必须能正常签成功
+	fB := &stubUpstream{checkinErr: nil, remain: 300}
+	s.cfg.Upstream = fB
+	p.Add(&auth.Auth{Kind: "traework", UID: "acctB", RefreshToken: "rt", AccessToken: "at",
+		ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
+
+	rB := s.checkinOne("acctB")
+	if !rB.OK {
+		t.Fatalf("账号B 今天没签，应能签成功（账号级去重，不受 A 影响）: %+v", rB)
+	}
+	if rB.AlreadyChecked {
+		t.Fatal("账号B 是本次新签到，不该带已签标记")
+	}
+	if !rB.HasRemain || rB.Remain != 300 {
+		t.Fatalf("账号B 余额应刷新为 300，得 %d", rB.Remain)
+	}
+}
