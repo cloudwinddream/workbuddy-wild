@@ -376,9 +376,30 @@ type CheckinResult struct {
 	//
 	// 这是"幂等的成功"，不是"本次签到成功"。前端必须据此区分文案：
 	// 若显示成绿色的"签到成功"，用户会期待积分上涨，发现没涨就会以为程序坏了。
-	AlreadyChecked bool  `json:"already_checked,omitempty"`
-	Remain         int64 `json:"remain"`
-	HasRemain      bool  `json:"has_remain"`
+	AlreadyChecked bool `json:"already_checked,omitempty"`
+	// GrantMissing 表示"签到标记已完成，但今日没有查到新增额度包"。
+	//
+	// 这是上游的一种异常状态：账号被标记为已签，却没真正发放积分
+	// （实测 2026-09-30 见过）。此时**不能**告诉用户"积分已到账"。
+	GrantMissing bool  `json:"grant_missing,omitempty"`
+	Remain       int64 `json:"remain"`
+	HasRemain    bool  `json:"has_remain"`
+}
+
+// currentDayGrant 由上游客户端实现的"今日是否真的到账了新额度包"探测。
+// 用接口探测而非直接 import 具体平台包，避免 scheduler 与各上游耦合。
+type currentDayGrant interface {
+	CurrentDayGrant(*auth.Auth) (bool, float64, error)
+}
+
+// currentDayGrant 查询该账号今天有没有新建权益包（真正到账的凭证）。
+// 上游不支持时返回 (false, 0, nil)，调用方应忽略该信息。
+func (s *Scheduler) currentDayGrant(a *auth.Auth) (bool, float64, error) {
+	g, ok := s.cfg.Upstream.(currentDayGrant)
+	if !ok {
+		return false, 0, nil
+	}
+	return g.CurrentDayGrant(a)
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
@@ -448,15 +469,26 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		// 9095（ErrCheckinAlreadyClaimed）与"已签到"文本都表示**该账号今天已经领过**，
 		// 属幂等成功（OK=true），不是失败。
 		//
-		// ⚠️ 去重键是「账号 + 设备」而非纯设备：实测两个账号用**完全相同**的设备号，
-		// 一个返 9095、一个返 success。所以同一设备号下多账号**本来就能各签一次**，
-		// 不需要给每个账号单独配设备号（v0.6.0 曾误判为设备级独占，v0.6.1 已改正）。
+		// ⚠️ 去重粒度是**账号级**（实测矩阵：同一账号换任何设备号结果都一样，
+		// 不同账号各自独立）。所以同一设备号下多账号**本来就能各签一次**，
+		// 不需要给每个账号单独配设备号（v0.6.0 误判为设备级、v0.6.1 误判为
+		// 账号+设备级，v0.6.3 最终确认为账号级）。
 		if isDeviceClaimed(checkinErr) || isAlready(checkinErr) {
 			// 文案必须说清"本次没有新增积分"，否则用户看到绿色的"签到成功"
 			// 却发现积分没涨，会以为程序坏了（真实反馈过这一点）。
 			r.OK = true
 			r.AlreadyChecked = true
 			r.Msg = "今日已签到（积分已在早先签到到账）"
+			// 但"已签到"标记**不等于**额度已到账 —— 上游可能出现
+			// "标记为已签却没发额度包"的状态（实测见过）。下面用权益包对账，
+			// 若发现今天根本没发过包，就把提示改成诚实的说法。
+			if g, amt, gerr := s.currentDayGrant(a); gerr == nil && !g {
+				r.GrantMissing = true
+				r.Msg = "今日签到标记已完成，但未查到新增额度（今日无新到账积分）"
+				log.Printf("checkin grant-missing platform=%s uid=%s（标记已签但今日无新建权益包）", name, uid)
+			} else if gerr == nil && g {
+				log.Printf("checkin grant-ok platform=%s uid=%s 今日到账=%v", name, uid, amt)
+			}
 		} else if isRateLimited(checkinErr) {
 			// 上游 9074：设备号未被认作已注册设备。**不是限流**，
 			// 重试永远不会成功（v0.5.7 已实测确认），因此不安排重试，

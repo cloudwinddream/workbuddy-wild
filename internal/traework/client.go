@@ -373,15 +373,20 @@ func shortDevice(s string) string {
 
 func (c *Client) DailyCheckin(a *auth.Auth) error {
 	log.Printf("traework checkin start uid=%s device=%s", a.UID, shortDevice(a.DeviceID))
-	// 前置查询：checked_in 或 did_checked_in 任一为真都表示今天已签过。
-	// （did_checked_in 是"今天签成功过"，checked_in 是"当前处于签到会话"）
+	// 前置查询：checked_in 或 did_checked_in 任一为真都表示**该账号**今天已签过。
+	//
+	// ⚠️ 判定粒度是**账号级**，与设备号无关。实测矩阵（2026-09-30）：
+	//   账号1（今天已签）+ 真实设备号 / 随机设备号 → 均返 9095
+	//   账号2（今天未签）+ 真实设备号 / 随机设备号 → 均返 success
+	//   ⇒ 决定因素是账号本身是否已签，换设备号不改变结果。
+	//   （这也解释了用户"手动切账号都能签"的现象：每个账号各自一份名额。）
 	checked, did, _, enable, err := c.CheckinStatusFull(a)
 	if err != nil {
 		return err
 	}
 	if checked || did {
 		log.Printf("traework checkin already uid=%s checked_in=%t did_checked_in=%t", a.UID, checked, did)
-		return fmt.Errorf("已签到")
+		return &ErrCheckinAlreadyClaimed{Msg: "今日已签到", Device: shortDevice(a.DeviceID)}
 	}
 	if !enable {
 		err := fmt.Errorf("checkin disabled")
@@ -410,11 +415,12 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 // 对 API 调用方**恒为 false**。若用它做验证，每次签到都会误判为失败，
 // 并在调度器里触发无意义的重试。这是 v0.5.5 之前未被发现的第二个 bug。
 //
-// ⚠️ 另注意 did_checked_in 是**设备级**的，不能证明"本账号"领到了额度：
-// 同设备下的第二个账号 claim 会拿到 9095，但查 status 一样是 true。
-// 因此本函数只用于确认"claim 之后设备层面确实已签"，
-// 真正的"本账号是否新增额度"要靠 CheckinClaim 的返回值把关
-// （9095 → ErrCheckinAlreadyClaimed）。
+// ⚠️ did_checked_in 是**账号级**的（今天这个账号签过没有），
+// 换设备号不改变它。因此它可用作"该账号今天是否已签"的前置判定。
+//
+// ⚠️ 但它**不能证明额度已到账**：上游存在"已标记签到但未发额度包"的
+// 异常状态（实测账号1 全天 did_checked_in=true 却没有任何今日新建权益包）。
+// 因此真正的对账手段是查权益包 start_time 是否落在今天，而不是看这个标志。
 func (c *Client) verifyCheckedIn(a *auth.Auth) error {
 	const maxTry = 3
 	for attempt := 0; attempt < maxTry; attempt++ {
@@ -535,6 +541,77 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 //	  这在 v0.5.1/v0.5.2 里被当成"解析失败"，是 150/不可用 问题的另一处根源。
 //
 // 返回值为整数（官网也是整数展示）；小数部分四舍五入。
+// CurrentDayGrant 报告该账号**今天**是否真的收到了新的签到额度包。
+//
+// 为什么需要它：`did_checked_in` 只是"签到标记"，并**不保证额度到账**。
+// 实测（2026-09-30）账号1 全天 did_checked_in=true，却查不到任何今日新建权益包，
+// 积分也确实没涨。若只看状态标志，会把这种"标记成功但没发额度"的异常
+// 误报成"签到成功"—— 用户看到的就是"提示签到成功但积分没变"。
+//
+// 判据：权益包里存在 `start_time` 落在**今天**、且带 credits_limit 的包。
+// 签到时上游会新建一个包（实测 limit=100 或 150，有效期约 31 天）。
+//
+// 返回 (是否有今日新包, 今日新包的总额度, error)。
+func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, err error) {
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCurrentEntList, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return false, 0, err
+	}
+	UgHeaders(req, a)
+	data, err := c.doJSON(req)
+	if err != nil {
+		return false, 0, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false, 0, fmt.Errorf("entitlement list parse: %w", err)
+	}
+	packs := findPackList(raw)
+	y, m, d := time.Now().Date()
+	for _, p := range packs {
+		flat := map[string]any{}
+		flattenInto(p, flat, 0)
+
+		// 取 start_time（秒级 Unix）
+		var st int64
+		for _, k := range []string{"start_time", "start_ts", "begin_time"} {
+			if v, ok := flat[k]; ok {
+				if n, ok := toInt64(v); ok {
+					st = n
+					break
+				}
+			}
+		}
+		if st <= 0 {
+			continue
+		}
+		// 上游可能是毫秒
+		if st > 1e12 {
+			st /= 1000
+		}
+		sy, sm, sd := time.Unix(st, 0).Date()
+		if sy != y || sm != m || sd != d {
+			continue
+		}
+		// 必须是 credits 型包（有 credits_limit）
+		for _, k := range limitFieldNames {
+			if v, ok := flat[k]; ok {
+				if n, ok := toFloat64(v); ok && n > 0 {
+					granted = true
+					amount += n
+					break
+				}
+			}
+		}
+	}
+	if granted {
+		log.Printf("traework grant uid=%s 今日新到账额度=%v", a.UID, amount)
+	} else {
+		log.Printf("traework grant uid=%s 今日无新建权益包（额度未到账）", a.UID)
+	}
+	return granted, amount, nil
+}
+
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCurrentEntList, bytes.NewReader([]byte("{}")))
 	if err != nil {

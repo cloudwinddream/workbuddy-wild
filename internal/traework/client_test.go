@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
@@ -128,8 +129,11 @@ func TestDailyCheckinSkipsClaimWhenAlreadyCheckedIn(t *testing.T) {
 	c := New()
 	c.HTTP = srv.Client()
 	c.UgHost = srv.URL
-	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err == nil || err.Error() != "已签到" {
-		t.Fatalf("err=%v, want 已签到", err)
+	// 已签到应返回 ErrCheckinAlreadyClaimed（幂等成功语义），
+	// 而不是普通错误 —— 调度器据此展示"今日已签到，本次无新增积分"。
+	err := c.DailyCheckin(&auth.Auth{AccessToken: "at"})
+	if err == nil || !IsCheckinAlreadyClaimed(err) {
+		t.Fatalf("err=%v, want ErrCheckinAlreadyClaimed", err)
 	}
 	if claimCalls.Load() != 0 {
 		t.Fatalf("claim calls=%d", claimCalls.Load())
@@ -565,5 +569,70 @@ func TestCheckinClaimWithoutDeviceRejected(t *testing.T) {
 	// 带真实设备号 → 成功
 	if err := c.CheckinClaim(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"}); err != nil {
 		t.Fatalf("带设备号应成功，得到 %v", err)
+	}
+}
+
+// CurrentDayGrant：判断"今天是否真的到账了新的签到额度包"。
+//
+// 这是对账的关键 —— did_checked_in 只是"签到标记"，不保证额度到账。
+// 实测见过"标记已签但今天没发任何包"的状态（账号被标记、积分却没涨）。
+// 因此必须能区分：
+//   - start_time 落在今天的 credits 包存在 → 真的到账了
+//   - 没有今天的包                        → 未到账，不能报"签到成功"
+func TestCurrentDayGrantDetectsTodayPack(t *testing.T) {
+	now := time.Now()
+	todayTS := now.Unix()
+	oldTS := now.Add(-48 * time.Hour).Unix()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpCurrentEntList {
+			// 两个包：一个前天（150），一个今天（100）
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
+				{"entitlement_base_info":{"quota":{"credits_limit":150},"start_time":%d},"usage":{}},
+				{"entitlement_base_info":{"quota":{"credits_limit":100},"start_time":%d},"usage":{}}
+			]}`, oldTS, todayTS)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !granted {
+		t.Fatal("存在今天的 100 分包，应判定已到账")
+	}
+	if amt != 100 {
+		t.Fatalf("今日到账额度=%v，want 100（只算今天的包，不能把前天的也算进来）", amt)
+	}
+}
+
+// 只有旧包（没有任何今天的包）时必须判为"未到账"。
+func TestCurrentDayGrantMissingWhenNoTodayPack(t *testing.T) {
+	oldTS := time.Now().Add(-72 * time.Hour).Unix()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits_limit":150},"start_time":%d},"usage":{}}
+		]}`, oldTS)))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if granted {
+		t.Fatal("没有任何今天的包，必须判为未到账（否则会把标记成功误报成额度到账）")
+	}
+	if amt != 0 {
+		t.Fatalf("amt=%v, want 0", amt)
 	}
 }

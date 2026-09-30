@@ -422,13 +422,15 @@ function bind() {
     $("btnCheckinAll").disabled = true;
     try {
       const res = await Go.CheckinAll();
-      // 三分类统计：新签到成功 / 今日已签（无新增积分）/ 失败。
-      // 把"今日已签"混进"成功"会让用户以为积分涨了却没涨。
-      const done = res.filter((r) => r.ok && r.already_checked).length;
+      // 四分类统计：新签到成功 / 今日已签 / 已签但未到账 / 失败。
+      // 把后三类混进"成功"会让用户以为积分涨了却没涨。
+      const missing = res.filter((r) => r.grant_missing).length;
+      const done = res.filter((r) => r.ok && r.already_checked && !r.grant_missing).length;
       const ok = res.filter((r) => r.ok && !r.already_checked).length;
       const failed = res.filter((r) => !r.ok);
       const parts = [`本次签到成功 ${ok}`];
       if (done) parts.push(`今日已签 ${done}（无新增积分）`);
+      if (missing) parts.push(`已签但未到账 ${missing}`);
       if (failed.length) {
         parts.push(
           `失败 ${failed.length}：` +
@@ -474,8 +476,12 @@ function bind() {
     const label = accountLabel(uid);
     try {
       const res = await Go.CheckinAccount(uid);
-      if (res && res.ok && res.already_checked) {
-        // 该账号今日已领：本次没有新增积分，绝不能显示成"签到成功"——
+      if (res && res.grant_missing) {
+        // 最诚实的一种：上游把账号标记为"已签"，但今天没发额度包。
+        // 绝不能报"签到成功"，用户会发现积分没涨。
+        toast(`${label} 已签到，但今日未查到新增额度（积分未增加）`);
+      } else if (res && res.ok && res.already_checked) {
+        // 今日已领：本次没有新增积分，绝不能显示成"签到成功"——
         // 用户会期待积分上涨，发现没涨就会以为程序坏了。
         toast(
           `${label} 今日已签到，本次无新增积分` +
