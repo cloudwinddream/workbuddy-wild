@@ -83,3 +83,73 @@ func TestReadClientDeviceIDFromTempDir(t *testing.T) {
 		t.Fatalf("得到 %q，want 9999888877776666", got)
 	}
 }
+
+// 多实例发现：用 --user-data-dir 起多个客户端时，设备号藏在自定义目录名下，
+// 只能靠**扫描** %APPDATA% 下名字含 "trae" 的一级目录发现。
+//
+// 场景：TRAE SOLO CN.exe --user-data-dir="%APPDATA%\TRAE SOLO CN - 账号2"
+//
+//	→ 数据落在 %APPDATA%\TRAE SOLO CN - 账号2\User\globalStorage\storage.json
+//
+// 这个目录名不在任何写死列表里，是 v0.6.2 新增的动态扫描要覆盖的情况。
+func TestListClientDeviceIDsDiscoversCustomProfileDirs(t *testing.T) {
+	appData := t.TempDir()
+	t.Setenv("APPDATA", appData)
+
+	// 造两个自定义 profile 目录，各含一个不同设备号
+	mk := func(dirName, dev string) {
+		g := filepath.Join(appData, dirName, "User", "globalStorage")
+		if err := os.MkdirAll(g, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		body := `{"iCubeAuthInfo://icube-dc:` + dev + `":{"v":1}}`
+		if err := os.WriteFile(filepath.Join(g, "storage.json"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	mk("TRAE SOLO CN", "1111222233334444")
+	mk("TRAE SOLO CN - 账号2", "5555666677778888")
+	// 干扰项：名字不含 trae，不应被发现
+	mk("SomeOtherApp", "9999000011112222")
+
+	ids := ListClientDeviceIDs()
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got["1111222233334444"] {
+		t.Errorf("未发现主目录设备号，ids=%v", ids)
+	}
+	if !got["5555666677778888"] {
+		t.Errorf("未发现自定义 profile 目录（--user-data-dir）的设备号，ids=%v", ids)
+	}
+	if got["9999000011112222"] {
+		t.Errorf("不应发现名字不含 trae 的目录，ids=%v", ids)
+	}
+}
+
+// 同一个设备号出现在多个目录时只应返回一次。
+func TestListClientDeviceIDsDedupes(t *testing.T) {
+	appData := t.TempDir()
+	t.Setenv("APPDATA", appData)
+	for _, n := range []string{"TRAE SOLO CN", "TRAE SOLO CN - 副本"} {
+		g := filepath.Join(appData, n, "User", "globalStorage")
+		if err := os.MkdirAll(g, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		body := `{"iCubeAuthInfo://icube-dc:4484256452647802":{"v":1}}`
+		if err := os.WriteFile(filepath.Join(g, "storage.json"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	ids := ListClientDeviceIDs()
+	n := 0
+	for _, id := range ids {
+		if id == "4484256452647802" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("同一设备号应只出现一次，实际 %d 次（ids=%v）", n, ids)
+	}
+}

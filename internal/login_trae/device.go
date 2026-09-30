@@ -27,23 +27,57 @@ var deviceIDKeyRe = regexp.MustCompile(`iCubeAuthInfo://icube-dc:(\d{8,32})`)
 
 // traeClientDirs TraeWork 桌面端的用户数据目录候选（Windows）。
 // 覆盖 CN 版与 SOLO 版；与 VS Code 系一致，globalStorage 在 User 子目录下。
+//
+// 除了写死的常见目录，还会**动态扫描** %APPDATA% / %LOCALAPPDATA% 下所有
+// 含 "TRAE" 的一级目录。原因：客户端支持 `--user-data-dir="自定义路径"`，
+// 用户常靠它跑多个实例（每个实例生成一个独立设备号）。
+// 例如：
+//
+//	TRAE SOLO CN.exe --user-data-dir="%APPDATA%\TRAE SOLO CN - 账号2"
+//	  → 数据落在 %APPDATA%\TRAE SOLO CN - 账号2\User\globalStorage\storage.json
+//
+// 这种自定义目录名不在任何固定列表里，只能靠扫描发现。
 func traeClientDirs() []string {
 	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if d == "" || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+
 	appData := os.Getenv("APPDATA")
+	localAppData := os.Getenv("LOCALAPPDATA")
 	home, _ := os.UserHomeDir()
+
+	// ① 写死的常见目录
 	if appData != "" {
-		dirs = append(dirs,
-			filepath.Join(appData, "TRAE SOLO CN", "User", "globalStorage"),
-			filepath.Join(appData, "Trae CN", "User", "globalStorage"),
-			filepath.Join(appData, "Trae", "User", "globalStorage"),
-			filepath.Join(appData, "TraeWork", "User", "globalStorage"),
-		)
+		for _, n := range []string{"TRAE SOLO CN", "Trae CN", "Trae", "TraeWork"} {
+			add(filepath.Join(appData, n, "User", "globalStorage"))
+		}
 	}
 	if home != "" {
-		dirs = append(dirs,
-			filepath.Join(home, ".trae-cn", "User", "globalStorage"),
-			filepath.Join(home, ".trae", "User", "globalStorage"),
-		)
+		add(filepath.Join(home, ".trae-cn", "User", "globalStorage"))
+		add(filepath.Join(home, ".trae", "User", "globalStorage"))
+	}
+
+	// ② 动态扫描：%APPDATA% / %LOCALAPPDATA% 下名字含 "trae" 的一级目录
+	for _, base := range []string{appData, localAppData} {
+		if base == "" {
+			continue
+		}
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() || !strings.Contains(strings.ToLower(e.Name()), "trae") {
+				continue
+			}
+			add(filepath.Join(base, e.Name(), "User", "globalStorage"))
+		}
 	}
 	return dirs
 }
@@ -64,9 +98,7 @@ func findClientStorageJSON() string {
 // 返回 "" 表示本机没有可用的客户端设备号（未装客户端，或格式不符）。
 // 调用方应在这种情况下回退到随机值，并提示用户签到可能失败。
 //
-// ⚠️ 重要：多账号场景下**必须对每个账号用同一个真实设备号**。
-// 签到额度是按「设备」而非「账号」发放的（同一设备一天只能签一个账号），
-// 但重点在于**服务端是否认这个设备号**：
+// ⚠️ 设备号必须是客户端**真实注册过**的：
 //
 //	随机生成的 32 位 hex            → claim 恒返 9074（设备校验失败）
 //	客户端真实注册的 16 位数字       → claim 返 0 / 9095（成功或今日已签）
@@ -116,12 +148,16 @@ func ReadClientDeviceID() string {
 
 // ListClientDeviceIDs 返回本机所有可用的客户端注册设备号（去重，保持发现顺序）。
 //
-// 多账号用户常见做法是「装多个客户端实例，每个目录登一个账号」，此时每个
-// storage.json 里都有一个真实注册设备号。为每个账号分配一个**不同的真实设备号**
-// 既能让服务端通过校验，又能天然避开「同设备一天只能签一个账号」的限制。
+// 典型多设备号来源：用 `--user-data-dir` 启动多个客户端实例，各登一个账号，
+// 每个实例会生成**独立**的 device_id。为不同账号分配不同设备号，
+// 便于区分"这个账号今天签过了"与"这个账号根本还没签"。
 //
-// 返回空切片表示本机没有任何客户端设备号（此时调用方只能回退随机值，
-// 并应提示用户签到很可能失败）。
+// ⚠️ 但要注意：**多账号并不需要多个设备号**。
+// 实测确认去重键是「账号 + 设备」—— 同一设备号下多账号**本来就能各签一次**。
+// 多个设备号只是让日志/面板更容易分辨，不是功能前提。
+//
+// 返回空切片表示本机没有任何客户端设备号（此时调用方回退随机值，
+// 签到会返回 9074，应提示用户）。
 func ListClientDeviceIDs() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -152,11 +188,8 @@ func ListClientDeviceIDs() []string {
 
 // NextClientDeviceID 为第 idx 个账号挑一个设备号。
 //
-// 策略：优先按序号分配不同的真实设备号（idx < 可用数量时），
-// 超出数量后复用一个真实设备号——此时同设备只能签一个账号，
-// 但至少不会误报 9074（其余账号会拿到 9095「今日已签」，语义清晰）。
-//
-// 完全没有客户端设备号时返回 ""，由调用方回退。
+// 优先按序号分配不同的真实设备号；数量不够时复用（同设备号下多账号仍能各签，
+// 只是日志里不好区分）。完全没有客户端设备号时返回 ""，由调用方回退。
 func NextClientDeviceID(idx int) string {
 	ids := ListClientDeviceIDs()
 	if len(ids) == 0 {

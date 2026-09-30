@@ -25,6 +25,34 @@
 
 ## 更新记录
 
+### v0.6.2（2026-09-30）
+- **新增多实例设备号自动发现** —— 支持 `--user-data-dir` 起的多个客户端
+  - **背景**：用户复制了一份客户端安装目录（`TRAE SOLO CN - 副本`），期望
+    得到第二个设备号。经排查发现**复制安装目录不会产生新设备号**。
+  - **定位到的机制**：设备号来自
+    `%APPDATA%\TRAE SOLO CN\machineid`
+    （本机 `eae86e8a-34f8-4e6a-a52d-d80bbd01e423`）+ 硬件指纹。
+    两份 exe 共用同一个 `%APPDATA%\TRAE SOLO CN`，因此算出**同一个** device_id。
+    两份 `debug.log` 里记录的完全相同：
+    ```
+    device_id: 4484256452647802   install_id: 1800321820556841
+    ```
+  - **要拿到第二个设备号**，必须让副本使用独立的数据目录：
+    ```
+    "TRAE SOLO CN.exe" --user-data-dir="%APPDATA%\TRAE SOLO CN - 账号2"
+    ```
+    新目录会生成全新的 `machineid` → 全新的 device_id。
+  - **代码修复**：`traeClientDirs()` 原本只列了写死的几个目录名，无法发现
+    `--user-data-dir` 自定义的路径（如 `TRAE SOLO CN - 账号2`）。
+    现改为**动态扫描** `%APPDATA%` / `%LOCALAPPDATA%` 下所有名字含 `trae`
+    的一级目录，自动纳入候选。同时保留写死列表以覆盖用户主目录下的
+    `.trae-cn` 等形式。
+  - 新增 2 个测试：`TestListClientDeviceIDsDiscoversCustomProfileDirs`
+    （能发现自定义 profile、且不会误纳名字不含 trae 的目录）、
+    `TestListClientDeviceIDsDedupes`（同设备号只返回一次）
+  - 补充说明：**多账号并不需要多个设备号**（见 v0.6.1）。多个设备号只是让
+    日志与面板更容易区分不同账号，不是功能前提。
+
 ### v0.6.1（2026-09-30）
 - **纠正 v0.6.0 的错误结论**：9095 的去重键是「**账号 + 设备**」，不是纯设备
   - **用户的反例**：「两个帐号手动切换，登陆一个客户端都能签到，为什么自动不行？」
