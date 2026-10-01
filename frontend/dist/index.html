@@ -30,6 +30,21 @@
         <span class="total-val" id="totalCredits">0</span>
         <span class="total-sub muted small" id="totalSub"></span>
       </div>
+      <!-- 分平台积分：WorkBuddy / TraeWork 各自合计，避免混在一起看不清来源 -->
+      <div class="split-bar">
+        <div class="split-item">
+          <span class="split-icon icon-wb" title="WorkBuddy">W</span>
+          <span class="split-name">WorkBuddy</span>
+          <span class="split-val" id="wbCredits">—</span>
+          <span class="split-cnt muted" id="wbCount"></span>
+        </div>
+        <div class="split-item">
+          <span class="split-icon icon-trae" title="TraeWork">T</span>
+          <span class="split-name">TraeWork</span>
+          <span class="split-val" id="traeCredits">—</span>
+          <span class="split-cnt muted" id="traeCount"></span>
+        </div>
+      </div>
       <div class="section-head">
         <span>账号 <span id="acctCount" class="muted"></span></span>
         <span class="muted small" id="strategyHint"></span>

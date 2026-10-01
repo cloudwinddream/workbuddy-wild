@@ -155,6 +155,10 @@ function renderAccounts() {
 
 // renderTotal 计算所有账号积分总和（实时更新）。
 // 变化时给数字加一次性动画，让"实时更新"看得见。
+//
+// 同时渲染**分平台小计**（WorkBuddy / TraeWork 各自合计）：
+// 两个平台的积分口径与用途不同，混在一个总数里看不出构成，
+// 因此单独列出，方便判断"到底哪边少了"。
 let lastTotal = null;
 function renderTotal() {
   const el = $("totalCredits");
@@ -172,6 +176,10 @@ function renderTotal() {
     }
     lastTotal = sum;
   }
+
+  // 分平台小计
+  renderSplit(accts);
+
   // 副标题：可用账号数 / 总数；有冷却或禁用时明确提示
   const total = accts.length;
   const usable = accts.filter((a) => !a.disabled && !a.cooling).length;
@@ -181,6 +189,32 @@ function renderTotal() {
     subEl.textContent = `${total} 个账号`;
   } else {
     subEl.textContent = `${usable}/${total} 个可用`;
+  }
+}
+
+// renderSplit 渲染两个平台各自的积分合计与账号数。
+// 该平台无账号时置为 "—" 并淡出，避免显示 0 造成"积分归零"的误解。
+function renderSplit(accts) {
+  const defs = [
+    { g: "workbuddy", val: "wbCredits", cnt: "wbCount" },
+    { g: "traework", val: "traeCredits", cnt: "traeCount" },
+  ];
+  for (const d of defs) {
+    const el = $(d.val);
+    const cntEl = $(d.cnt);
+    if (!el || !cntEl) continue;
+    const list = accts.filter((a) => (a.group || "workbuddy") === d.g);
+    const box = el.closest(".split-item");
+    if (list.length === 0) {
+      el.textContent = "—";
+      cntEl.textContent = "";
+      if (box) box.classList.add("empty");
+      continue;
+    }
+    const s = list.reduce((acc, a) => acc + (Number(a.credits) || 0), 0);
+    el.textContent = s.toLocaleString();
+    cntEl.textContent = `${list.length} 个`;
+    if (box) box.classList.remove("empty");
   }
 }
 

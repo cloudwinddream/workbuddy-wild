@@ -324,3 +324,37 @@ button, input, select, textarea, label, a,
 :root[data-theme="dark"] .total-bar {
   background: linear-gradient(135deg, rgba(74, 140, 247, 0.14), rgba(52, 211, 153, 0.12));
 }
+
+/* 分平台积分条：WorkBuddy / TraeWork 各自合计 */
+.split-bar {
+  display: flex; gap: 8px; margin-bottom: 7px; flex: none;
+}
+.split-item {
+  flex: 1; min-width: 0;
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 5px 8px;
+  background: var(--panel, rgba(0,0,0,0.02));
+  border: 1px solid var(--border); border-radius: 7px;
+}
+.split-icon {
+  flex: none; width: 16px; height: 16px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  align-self: center;
+}
+/* 复用账号卡片的图标配色，保持视觉一致 */
+.split-item .icon-wb   { background: #e0edff; color: #2563eb; }
+.split-item .icon-trae { background: #ccfbf1; color: #0f766e; }
+.split-name { font-size: 11px; color: var(--muted); flex: none; }
+.split-val {
+  font-size: 14px; font-weight: 600; font-family: var(--mono);
+  color: var(--text, #1f2328); margin-left: auto; flex: none;
+}
+.split-cnt { font-size: 10px; flex: none; }
+/* 该平台没有账号时整体淡出，避免占位干扰 */
+.split-item.empty { opacity: 0.45; }
+
+:root[data-theme="dark"] .split-item { background: rgba(255,255,255,0.04); }
+:root[data-theme="dark"] .split-item .icon-wb   { background: #1e3a5f; color: #8ab4f8; }
+:root[data-theme="dark"] .split-item .icon-trae { background: #134e4a; color: #5eead4; }
+:root[data-theme="dark"] .split-val { color: #f2f2f4; }
