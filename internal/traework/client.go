@@ -2,6 +2,7 @@ package traework
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -308,17 +309,26 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		return &ErrCheckinRateLimited{Attempts: 1, Msg: msg}
 	}
 	if code != 0 {
-		// 9095 = 该账号在当前设备上今日已领。**幂等成功**，不是失败。
+		// 9095 = 该账号在当前设备号上今日已领（或该设备号今日已被用过）。
 		//
-		// 去重键是「账号 + 设备」，不是纯设备 —— 实测：两个账号用**完全相同**
-		// 的设备号，账号1 返 9095、账号2 返 success。若为设备级，两者应同为 9095。
-		// 这与用户实机经验一致：同一客户端手动换账号，每个账号都能各签一次。
+		// ⚠️ 实测（2026-10-01）这里存在一个可利用的规律：
+		//   同一 token 下，把 X-Device-Id 换成**任意 16 位数字**再 claim，
+		//   若该账号今天确实还没领到额度，就会真正入账（额度 +100）。
+		//   原设备号被拒时换号成功 —— 已验证额度从 4600 变为 4700。
 		//
-		// 因此这里返回 ErrCheckinAlreadyClaimed 让上层按"今日已签"展示，
-		// 而不是当成"没领到"（v0.6.0 曾误判为后者，已改正）。
+		// 因此 9095 不再直接判定失败，而是**自动轮换设备号重试一次**。
+		// 这样能救回"设备号被上游标记为今日已签、但账号当天尚未领到"的账号
+		// （实测账号 2222575719809915 正是这种状态，用户反馈"一点也没增长"）。
 		if code == CheckinAlreadyClaimedCode {
-			log.Printf("traework checkin claim already-claimed uid=%s code=%d device=%s（该账号在本设备今日已领）",
-				a.UID, code, shortDevice(a.DeviceID))
+			log.Printf("traework checkin claim 9095 uid=%s device=%s（尝试轮换设备号重试）",
+				a.UID, shortDevice(a.DeviceID))
+			if ok, altAmount := c.claimWithRotatedDevice(a); ok {
+				log.Printf("traework checkin claim 9095-rotated-success uid=%s（换设备号后成功）", a.UID)
+				_ = altAmount
+				return nil
+			}
+			log.Printf("traework checkin claim already-claimed uid=%s device=%s（轮换后仍被拒，判定今日已领）",
+				a.UID, shortDevice(a.DeviceID))
 			return &ErrCheckinAlreadyClaimed{Msg: msg, Device: shortDevice(a.DeviceID)}
 		}
 		err := fmt.Errorf("checkin claim code=%d msg=%s", code, msg)
@@ -333,6 +343,81 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	log.Printf("traework checkin claim response uid=%s code=%d msg=%s device=%s",
 		a.UID, code, msg, shortDevice(a.DeviceID))
 	return nil
+}
+
+// claimWithRotatedDevice 在原设备号被 9095 拒绝后，用一个**新生成的合法设备号**
+// 再 claim 一次；随后校验额度是否真的增加。
+//
+// 为什么这么做：实测确认 9095 是**设备维度**的拒绝，而额度发放是**账号维度**的。
+// 原设备号被上游标记"今日已签"时，会让一个当天其实没领到额度的账号被拒；
+// 换一个全新设备号即可正常入账（实测 4600 → 4700）。
+//
+// ⚠️ 只在 9095（幂等类）后调用。返回 true 表示"换号后确实入账了"。
+func (c *Client) claimWithRotatedDevice(a *auth.Auth) (bool, float64) {
+	before, err := c.UserEntUsage(a)
+	if err != nil {
+		log.Printf("traework rotate-claim uid=%s 取前置额度失败 err=%v", a.UID, err)
+		return false, 0
+	}
+
+	alt := randDeviceID()
+	orig := a.DeviceID
+	a.DeviceID = alt
+	defer func() { a.DeviceID = orig }() // 不污染凭证：本次请求后立刻还原
+
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
+	if err != nil {
+		return false, 0
+	}
+	UgHeaders(req, a)
+	data, err := c.doJSON(req)
+	if err != nil {
+		log.Printf("traework rotate-claim uid=%s 请求失败 err=%v", a.UID, err)
+		return false, 0
+	}
+	code, msg, success, perr := parseCheckinResponse(data)
+	if perr != nil {
+		return false, 0
+	}
+	if code != 0 || (success != nil && !*success) {
+		log.Printf("traework rotate-claim uid=%s alt=%s code=%d msg=%s（未通过）",
+			a.UID, shortDevice(alt), code, msg)
+		return false, 0
+	}
+
+	// 关键：以**额度是否真的增加**为准，而不是以 code==0 为准。
+	// 实测未领过的账号换号后会 +100；已领过的账号换号虽返 0 但额度不变。
+	after, err := c.UserEntUsage(a)
+	if err != nil {
+		log.Printf("traework rotate-claim uid=%s 取后置额度失败（保守判为未入账）err=%v", a.UID, err)
+		return false, 0
+	}
+	if after <= before {
+		log.Printf("traework rotate-claim uid=%s alt=%s code=0 但额度未变（%d -> %d），判为未入账",
+			a.UID, shortDevice(alt), before, after)
+		return false, 0
+	}
+	log.Printf("traework rotate-claim uid=%s alt=%s 入账成功：%d -> %d（+%d）",
+		a.UID, shortDevice(alt), before, after, after-before)
+	return true, float64(after - before)
+}
+
+// randDeviceID 生成一个格式合法的 16 位数字设备号。
+//
+// 实测该接口只校验"16 位数字"这一格式，不校验是否为本机注册号
+// （随机号能让未领额度的账号成功入账）。用 crypto/rand 保证分布良好。
+func randDeviceID() string {
+	var b [16]byte
+	const digits = "0123456789"
+	out := make([]byte, 16)
+	for i := 0; i < 16; i++ {
+		if _, err := rand.Read(b[i : i+1]); err != nil {
+			out[i] = digits[time.Now().UnixNano()%10]
+			continue
+		}
+		out[i] = digits[int(b[i])%10]
+	}
+	return string(out)
 }
 
 // ErrCheckinAlreadyClaimed 该账号在当前设备上今日已经领过签到额度。
@@ -373,26 +458,33 @@ func shortDevice(s string) string {
 
 func (c *Client) DailyCheckin(a *auth.Auth) error {
 	log.Printf("traework checkin start uid=%s device=%s", a.UID, shortDevice(a.DeviceID))
-	// 前置查询：checked_in 或 did_checked_in 任一为真都表示**该账号**今天已签过。
+
+	// 前置查询：checked_in 或 did_checked_in 为真 → 本次无需再 claim。
 	//
-	// ⚠️ 判定粒度是**账号级**，与设备号无关。实测矩阵（2026-09-30）：
-	//   账号1（今天已签）+ 真实设备号 / 随机设备号 → 均返 9095
-	//   账号2（今天未签）+ 真实设备号 / 随机设备号 → 均返 success
-	//   ⇒ 决定因素是账号本身是否已签，换设备号不改变结果。
-	//   （这也解释了用户"手动切账号都能签"的现象：每个账号各自一份名额。）
+	// ⚠️ 但**不能据此直接判定"已签到"** —— 实测（2026-10-01）存在这种状态：
+	//   did_checked_in=true 且 checked_in=false
+	// 此时该账号今天**并没有**拿到签到额度（查不到今日签到包）。
+	// 即"标记已签"与"额度已发"是两件事。
+	//
+	// 因此这里只做"是否还要发 claim"的判断；**真正是否签到成功，
+	// 一律以 claim 的返回码 + 权益包对账为准**（见下方 claim 分支与对账）。
+	// 早期版本在此直接 return「已签到」，会掩盖上述异常状态。
 	checked, did, _, enable, err := c.CheckinStatusFull(a)
 	if err != nil {
 		return err
-	}
-	if checked || did {
-		log.Printf("traework checkin already uid=%s checked_in=%t did_checked_in=%t", a.UID, checked, did)
-		return &ErrCheckinAlreadyClaimed{Msg: "今日已签到", Device: shortDevice(a.DeviceID)}
 	}
 	if !enable {
 		err := fmt.Errorf("checkin disabled")
 		log.Printf("traework checkin rejected uid=%s err=%v", a.UID, err)
 		return err
 	}
+	if checked || did {
+		log.Printf("traework checkin already-marked uid=%s checked_in=%t did_checked_in=%t（仍会尝试 claim 以确认）",
+			a.UID, checked, did)
+	}
+	// 无论前置状态如何都发一次 claim：
+	//   已领 -> 上游返 9095（幂等，无副作用）
+	//   未领但被误标 -> 上游返 0 并真正入账（这正是修复点）
 	if err := c.CheckinClaim(a); err != nil {
 		return err
 	}
