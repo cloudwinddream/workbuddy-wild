@@ -639,18 +639,21 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 // 实测（2026-10-01）账号2 的 did_checked_in 在签到前就是 true，且当天
 // 查不到任何签到包、积分也一分没涨 —— 只看状态标志必然误报"签到成功"。
 //
-// ⚠️ 关键修正（v0.6.5）：**不能把"今天的任意新包"都当成签到到账**。
-// 每月 1 日上游会自动发一个月度包（实测 limit=500 @00:00:00），
-// 它的 start_time 也落在今天。若把它算进来，会把"月初发放"误报成"签到到账"。
-// 实测该 bug：账号2 今日只拿到月初 500 包，却被报成"签到到账 500"。
+// ★ 识别方式（v0.6.7 起改用服务端权威标识）：
+// 上游给每个权益包都带了**自解释的唯一 ID**，直接读它即可精确判定：
 //
-// 因此必须按**时间窗 + 金额特征**识别真正的签到包：
-//   - 签到包额度是小额（实测 100，历史上也见过 150）
-//   - 签到包的 start_time 应贴近**本次签到时刻**，而不是凌晨整点
+//	entitlement_id = "checkin_20261001_<uid>"        ← 某日签到奖励
+//	entitlement_id = "monthly_bonus_202610_<uid>"    ← 某月月初奖励
+//	product_extra.package_extra.package_name = "签到奖励"
+//	product_extra.package_extra.package_source_type = 9  ← 签到
 //
-// 判据：取 start_time 在 [今天, 今天+1天) 且**小时数不在 0~1 之间**
-// （避开月初/日初的定时发放），并且额度 ≤ checkinGrantMaxCredits 的包。
-// 这样月末（月初包已过期）与月初（月初包与签到包并存）两种情况都能正确区分。
+// 因此判据：**entitlement_id 以 "checkin_" 开头 且日期段为今天**。
+//
+// ⚠️ 历史踩坑（务必保留这段说明）：
+//   v0.6.3 用"今天有任意新包"判定 → 把月初包误算成签到到账
+//   v0.6.5 改用「时间窗(hour≥1) + 金额(≤300)」启发式 → 能工作但很脆弱：
+//          若签到发生在凌晨、或签到额度调整 >300，就会再次误判。
+//   v0.6.7 换成读 entitlement_id —— **不再依赖任何猜测**。
 //
 // 返回 (是否有签到到账, 到账额度, error)。
 func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, err error) {
@@ -668,74 +671,54 @@ func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, er
 		return false, 0, fmt.Errorf("entitlement list parse: %w", err)
 	}
 	packs := findPackList(raw)
-	y, m, d := time.Now().Date()
+	todayKey := time.Now().Format("20060102") // 与 entitlement_id 里的日期段一致
 
-	var ignoredBig []string
+	var others []string
 	for _, p := range packs {
 		flat := map[string]any{}
 		flattenInto(p, flat, 0)
 
-		// 取 start_time（秒级 Unix）
-		var st int64
-		for _, k := range []string{"start_time", "start_ts", "begin_time"} {
-			if v, ok := flat[k]; ok {
-				if n, ok := toInt64(v); ok {
-					st = n
-					break
-				}
-			}
-		}
-		if st <= 0 {
-			continue
-		}
-		// 上游可能是毫秒
-		if st > 1e12 {
-			st /= 1000
-		}
-		t := time.Unix(st, 0)
-		sy, sm, sd := t.Date()
-		if sy != y || sm != m || sd != d {
+		id, _ := flat["entitlement_id"].(string)
+		if id == "" {
 			continue
 		}
 
-		// 额度
-		var lim float64
-		for _, k := range limitFieldNames {
-			if v, ok := flat[k]; ok {
-				if n, ok := toFloat64(v); ok && n > 0 {
-					lim = n
-					break
-				}
+		// ① 权威判据：entitlement_id 形如 checkin_<YYYYMMDD>_<uid>
+		if !strings.HasPrefix(id, checkinIDPrefix) {
+			// 记录非签到包，便于排查（如 monthly_bonus_202610_... / 纯数字ID）
+			if n, ok := toFloat64(flat["credits_limit"]); ok && n > 0 {
+				others = append(others, fmt.Sprintf("%s(%s)", id, formatCredits(n)))
 			}
-		}
-		if lim <= 0 {
 			continue
 		}
-
-		// ① 时间窗：排除凌晨整点的定时发放（月初包实测 00:00:00）
-		if t.Hour() < scheduledGrantMaxHour {
-			ignoredBig = append(ignoredBig, fmt.Sprintf("%.0f@%s(定时发放)", lim, t.Format("15:04:05")))
-			continue
+		// 拆出日期段：checkin_20261001_xxx
+		rest := strings.TrimPrefix(id, checkinIDPrefix)
+		if i := strings.IndexByte(rest, '_'); i > 0 {
+			rest = rest[:i]
 		}
-		// ② 金额：签到是小额；大额包（如月度 4000/500 订阅）不算
-		if lim > checkinGrantMaxCredits {
-			ignoredBig = append(ignoredBig, fmt.Sprintf("%.0f@%s(大额)", lim, t.Format("15:04:05")))
-			continue
+		if rest != todayKey {
+			continue // 往日的签到包，不计入今天
 		}
-		granted = true
-		amount += lim
+		if n, ok := toFloat64(flat["credits_limit"]); ok && n > 0 {
+			granted = true
+			amount += n
+		}
 	}
 
 	if granted {
-		log.Printf("traework grant uid=%s 今日签到到账=%v", a.UID, amount)
+		log.Printf("traework grant uid=%s 今日签到到账=%s（据 entitlement_id）", a.UID, formatCredits(amount))
 	} else {
-		if len(ignoredBig) > 0 {
-			log.Printf("traework grant uid=%s 今日无签到包（已排除非签到发放: %v）", a.UID, ignoredBig)
-		} else {
-			log.Printf("traework grant uid=%s 今日无任何新建权益包（签到额度未到账）", a.UID)
-		}
+		log.Printf("traework grant uid=%s 今日无签到包（非签到包: %v）", a.UID, others)
 	}
 	return granted, amount, nil
+}
+
+// formatCredits 把额度格式化成便于阅读的整数串（100 而非 100.000000）。
+func formatCredits(v float64) string {
+	if v == math.Trunc(v) {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%g", v)
 }
 
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {

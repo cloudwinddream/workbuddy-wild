@@ -168,28 +168,27 @@ func TestCheckinClaimWithoutDeviceRejected(t *testing.T) {
 	}
 }
 
-// CurrentDayGrant：判断"今天是否真的到账了新的签到额度包"。
+// ---- CurrentDayGrant：据 entitlement_id 精确识别"今天的签到到账" ----
 //
-// 这是对账的关键 —— did_checked_in 只是"签到标记"，不保证额度到账。
-// 实测见过"标记已签但今天没发任何包"的状态（账号被标记、积分却没涨）。
-// 因此必须能区分：
-//   - start_time 落在今天的 credits 包存在 → 真的到账了
-//   - 没有今天的包                        → 未到账，不能报"签到成功"
-func TestCurrentDayGrantDetectsTodayPack(t *testing.T) {
-	now := time.Now()
-	todayTS := now.Unix()
-	oldTS := now.Add(-48 * time.Hour).Unix()
+// 实测上游给每个包带自解释 ID：
+//   checkin_<YYYYMMDD>_<uid>        签到奖励
+//   monthly_bonus_<YYYYMM>_<uid>    月初奖励
+//   纯数字                          固定福利包
+//
+// 该识别方式取代了 v0.6.5 的"时间窗+金额"启发式（那套脆弱、易误判）。
 
+func todayYYYYMMDD() string { return time.Now().Format("20060102") }
+
+// 今天的签到包存在 -> 判定已到账，且金额只算签到包。
+func TestCurrentDayGrantDetectsCheckinPack(t *testing.T) {
+	today := todayYYYYMMDD()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == EpCurrentEntList {
-			// 两个包：一个前天（150），一个今天（100）
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
-				{"entitlement_base_info":{"quota":{"credits_limit":150},"start_time":%d},"usage":{}},
-				{"entitlement_base_info":{"quota":{"credits_limit":100},"start_time":%d},"usage":{}}
-			]}`, oldTS, todayTS)))
-			return
-		}
-		http.NotFound(w, r)
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"entitlement_id":"367884760578","quota":{"credits_limit":4000}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"monthly_bonus_202610_u1","quota":{"credits_limit":500}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"checkin_20260930_u1","quota":{"credits_limit":100}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"checkin_` + today + `_u1","quota":{"credits_limit":100}},"usage":{}}
+		]}`))
 	}))
 	defer srv.Close()
 
@@ -201,20 +200,48 @@ func TestCurrentDayGrantDetectsTodayPack(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	if !granted {
-		t.Fatal("存在今天的 100 分包，应判定已到账")
+		t.Fatal("存在今天的 checkin_ 包，应判为已到账")
 	}
 	if amt != 100 {
-		t.Fatalf("今日到账额度=%v，want 100（只算今天的包，不能把前天的也算进来）", amt)
+		t.Fatalf("amount=%v, want 100（只算今天的签到包；4000/500/往日签到都不算）", amt)
 	}
 }
 
-// 只有旧包（没有任何今天的包）时必须判为"未到账"。
+// 只有月初包、没有今天的签到包 -> 必须判为未到账。
+//
+// 这是 2026-10-01 的真实 bug：月初 500 包的 start_time 也在今天，
+// 旧实现（按时间判定）把它误算成"签到到账 500"。
+func TestCurrentDayGrantIgnoresMonthlyBonus(t *testing.T) {
+	today := todayYYYYMMDD()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"entitlement_id":"367884760578","quota":{"credits_limit":4000}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"monthly_bonus_202610_u2","quota":{"credits_limit":500}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"checkin_20260930_u2","quota":{"credits_limit":100}},"usage":{}}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if granted {
+		t.Fatalf("只有月初包+往日签到包，不得判为今天已到账（amt=%v）", amt)
+	}
+	_ = today
+}
+
+// 完全没有今天的包（连月初包都没有）-> 未到账。
 func TestCurrentDayGrantMissingWhenNoTodayPack(t *testing.T) {
-	oldTS := time.Now().Add(-72 * time.Hour).Unix()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
-			{"entitlement_base_info":{"quota":{"credits_limit":150},"start_time":%d},"usage":{}}
-		]}`, oldTS)))
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"entitlement_id":"367884760578","quota":{"credits_limit":4000}},"usage":{}},
+			{"entitlement_base_info":{"entitlement_id":"checkin_20260928_u3","quota":{"credits_limit":150}},"usage":{}}
+		]}`))
 	}))
 	defer srv.Close()
 
@@ -225,36 +252,18 @@ func TestCurrentDayGrantMissingWhenNoTodayPack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if granted {
-		t.Fatal("没有任何今天的包，必须判为未到账（否则会把标记成功误报成额度到账）")
-	}
-	if amt != 0 {
-		t.Fatalf("amt=%v, want 0", amt)
+	if granted || amt != 0 {
+		t.Fatalf("无今日签到包时应判未到账，得 granted=%t amt=%v", granted, amt)
 	}
 }
 
-// ★ 回归（2026-10-01 真实案例）：月初发放的 500 分包**不能**被当成签到到账。
-//
-// 实测数据（账号 2222575719809915）：
-//
-//	total=4600  consumed=0  remain=4600（签到前后完全没变）
-//	今日新建包只有一个：limit=500 @00:00:00 —— 那是月初自动发放，不是签到
-//
-// 旧实现把"今天的任意新包"都算成签到到账，于是报出"今日到账 500"，
-// 并显示"积分已在早先签到到账" —— 而实际该账号今天一分没加。
-//
-// v0.6.5 修正：按「时间窗（排除凌晨整点定时发放）+ 金额（≤300 才是签到包）」识别。
-func TestCurrentDayGrantIgnoresMonthlyPack(t *testing.T) {
-	now := time.Now()
-	// 月初包：今天 00:00:00
-	y, m, d := now.Date()
-	monthStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
-
+// 兼容性：上游若改掉 entitlement_id，至少不能崩（返回未到账而非 panic）。
+func TestCurrentDayGrantHandlesMissingIDs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
-			{"entitlement_base_info":{"quota":{"credits_limit":4000},"start_time":%d},"usage":{}},
-			{"entitlement_base_info":{"quota":{"credits_limit":500},"start_time":%d},"usage":{}}
-		]}`, now.Add(-48*time.Hour).Unix(), monthStart.Unix())))
+		_, _ = w.Write([]byte(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits_limit":100}},"usage":{}},
+			{"entitlement_base_info":{},"usage":{}}
+		]}`))
 	}))
 	defer srv.Close()
 
@@ -263,43 +272,9 @@ func TestCurrentDayGrantIgnoresMonthlyPack(t *testing.T) {
 	c.UgHost = srv.URL
 	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
 	if err != nil {
-		t.Fatalf("err=%v", err)
+		t.Fatalf("缺 entitlement_id 不应报错，err=%v", err)
 	}
-	if granted {
-		t.Fatalf("月初 500 包（00:00:00 定时发放）不得被当成签到到账，却报 amount=%v", amt)
-	}
-	if amt != 0 {
-		t.Fatalf("amount=%v, want 0", amt)
-	}
-}
-
-// 月初包 + 真实签到包并存时，只应把签到包计入（金额 100，时间非凌晨）。
-func TestCurrentDayGrantCountsOnlyCheckinPack(t *testing.T) {
-	now := time.Now()
-	y, m, d := now.Date()
-	monthStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
-	// 签到包：今天中午
-	checkinAt := time.Date(y, m, d, 12, 30, 0, 0, time.Local)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
-			{"entitlement_base_info":{"quota":{"credits_limit":500},"start_time":%d},"usage":{}},
-			{"entitlement_base_info":{"quota":{"credits_limit":100},"start_time":%d},"usage":{}}
-		]}`, monthStart.Unix(), checkinAt.Unix())))
-	}))
-	defer srv.Close()
-
-	c := New()
-	c.HTTP = srv.Client()
-	c.UgHost = srv.URL
-	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
-	if err != nil {
-		t.Fatalf("err=%v", err)
-	}
-	if !granted {
-		t.Fatal("存在中午创建的 100 签到包，应判为已到账")
-	}
-	if amt != 100 {
-		t.Fatalf("amount=%v, want 100（只算签到包，不把月初 500 算进来）", amt)
+	if granted || amt != 0 {
+		t.Fatalf("无 ID 时保守判未到账，得 granted=%t amt=%v", granted, amt)
 	}
 }

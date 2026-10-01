@@ -59,20 +59,28 @@ const CheckinAlreadyClaimedCode = 9095
 // CheckinBadParamsCode 签到业务码 9004：缺少必需的订单参数（实测为缺 X-Device-Id）。
 const CheckinBadParamsCode = 9004
 
-// checkinGrantMaxCredits 签到包的额度上限（用于把它与月度订阅包区分开）。
+// checkinIDPrefix 签到包的 entitlement_id 前缀。
 //
+// 实测上游给每个权益包都带自解释的 entitlement_id：
+//
+//	checkin_20260930_2222575719809915        ← 9/30 的签到奖励
+//	checkin_20261001_2222575719809915        ← 10/1 的签到奖励
+//	monthly_bonus_202610_2222575719809915    ← 2026年10月的月初奖励
+//	367884760578                             ← 固定福利包（纯数字）
+//
+// 因此判断"今天是否真的发了签到额度"，直接读 entitlement_id 前缀 + 日期段
+// 即可，无需依赖时间/金额等启发式（那套在 v0.6.5 用过，脆弱且易误判）。
+const checkinIDPrefix = "checkin_"
+
+// 以下两个常量保留作**兜底参考**：万一上游改了 entitlement_id 命名，
+// 可退回"时间窗 + 金额"的启发式判定。当前主路径已改用 entitlement_id。
+//
+// checkinGrantMaxCredits 签到包的额度上限（用于与月度订阅包区分）。
 // 实测签到包为 100 或 150；月度订阅包是 4000 / 500 这类大额。
-// 取 300 作阈值，可稳定区分二者。
 const checkinGrantMaxCredits = 300
 
 // scheduledGrantMaxHour 定时发放包的"凌晨整点"判定上界（不含）。
-//
-// 实测月初包 `limit=500` 的 start_time 恰为 **00:00:00**。
-// 签到是用户/程序触发的，不会落在凌晨 0 点整。
-// 因此把 hour < 该值的同日新包视为**定时发放**，不计入签到到账。
-//
-// ⚠️ 必要性：若不排除，月初当天会把"月初发放 500"误报成"签到到账 500"
-// —— 实测踩过这个坑（账号2 今日只拿到月初包，却被报成签到到账）。
+// 实测月初包 start_time 恰为 00:00:00，而签到不会落在凌晨整点。
 const scheduledGrantMaxHour = 1
 
 // CheckinClaimBody 签到 claim 接口的请求体。
