@@ -636,3 +636,74 @@ func TestCurrentDayGrantMissingWhenNoTodayPack(t *testing.T) {
 		t.Fatalf("amt=%v, want 0", amt)
 	}
 }
+
+// ★ 回归（2026-10-01 真实案例）：月初发放的 500 分包**不能**被当成签到到账。
+//
+// 实测数据（账号 2222575719809915）：
+//
+//	total=4600  consumed=0  remain=4600（签到前后完全没变）
+//	今日新建包只有一个：limit=500 @00:00:00 —— 那是月初自动发放，不是签到
+//
+// 旧实现把"今天的任意新包"都算成签到到账，于是报出"今日到账 500"，
+// 并显示"积分已在早先签到到账" —— 而实际该账号今天一分没加。
+//
+// v0.6.5 修正：按「时间窗（排除凌晨整点定时发放）+ 金额（≤300 才是签到包）」识别。
+func TestCurrentDayGrantIgnoresMonthlyPack(t *testing.T) {
+	now := time.Now()
+	// 月初包：今天 00:00:00
+	y, m, d := now.Date()
+	monthStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits_limit":4000},"start_time":%d},"usage":{}},
+			{"entitlement_base_info":{"quota":{"credits_limit":500},"start_time":%d},"usage":{}}
+		]}`, now.Add(-48*time.Hour).Unix(), monthStart.Unix())))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if granted {
+		t.Fatalf("月初 500 包（00:00:00 定时发放）不得被当成签到到账，却报 amount=%v", amt)
+	}
+	if amt != 0 {
+		t.Fatalf("amount=%v, want 0", amt)
+	}
+}
+
+// 月初包 + 真实签到包并存时，只应把签到包计入（金额 100，时间非凌晨）。
+func TestCurrentDayGrantCountsOnlyCheckinPack(t *testing.T) {
+	now := time.Now()
+	y, m, d := now.Date()
+	monthStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
+	// 签到包：今天中午
+	checkinAt := time.Date(y, m, d, 12, 30, 0, 0, time.Local)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"user_entitlement_pack_list":[
+			{"entitlement_base_info":{"quota":{"credits_limit":500},"start_time":%d},"usage":{}},
+			{"entitlement_base_info":{"quota":{"credits_limit":100},"start_time":%d},"usage":{}}
+		]}`, monthStart.Unix(), checkinAt.Unix())))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+	granted, amt, err := c.CurrentDayGrant(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !granted {
+		t.Fatal("存在中午创建的 100 签到包，应判为已到账")
+	}
+	if amt != 100 {
+		t.Fatalf("amount=%v, want 100（只算签到包，不把月初 500 算进来）", amt)
+	}
+}

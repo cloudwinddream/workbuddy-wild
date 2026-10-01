@@ -59,6 +59,22 @@ const CheckinAlreadyClaimedCode = 9095
 // CheckinBadParamsCode 签到业务码 9004：缺少必需的订单参数（实测为缺 X-Device-Id）。
 const CheckinBadParamsCode = 9004
 
+// checkinGrantMaxCredits 签到包的额度上限（用于把它与月度订阅包区分开）。
+//
+// 实测签到包为 100 或 150；月度订阅包是 4000 / 500 这类大额。
+// 取 300 作阈值，可稳定区分二者。
+const checkinGrantMaxCredits = 300
+
+// scheduledGrantMaxHour 定时发放包的"凌晨整点"判定上界（不含）。
+//
+// 实测月初包 `limit=500` 的 start_time 恰为 **00:00:00**。
+// 签到是用户/程序触发的，不会落在凌晨 0 点整。
+// 因此把 hour < 该值的同日新包视为**定时发放**，不计入签到到账。
+//
+// ⚠️ 必要性：若不排除，月初当天会把"月初发放 500"误报成"签到到账 500"
+// —— 实测踩过这个坑（账号2 今日只拿到月初包，却被报成签到到账）。
+const scheduledGrantMaxHour = 1
+
 // CheckinClaimBody 签到 claim 接口的请求体。
 //
 // **不可用空对象 `{}`** —— 多个独立实现一致确认：空请求体会被服务端拒为 9074

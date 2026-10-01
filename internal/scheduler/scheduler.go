@@ -474,20 +474,29 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		// 不需要给每个账号单独配设备号（v0.6.0 误判为设备级、v0.6.1 误判为
 		// 账号+设备级，v0.6.3 最终确认为账号级）。
 		if isDeviceClaimed(checkinErr) || isAlready(checkinErr) {
-			// 文案必须说清"本次没有新增积分"，否则用户看到绿色的"签到成功"
-			// 却发现积分没涨，会以为程序坏了（真实反馈过这一点）。
+			// 上游认为该账号今天已签（9095）。但"已签标记"**不等于**额度到账，
+			// 下面用权益包对账，据实给出提示。
+			//
+			// 实测（2026-10-01）存在这种状态：did_checked_in=true 且当天
+			// 查不到签到包、积分也一分没涨。此时若说"积分已到账"就是谎报。
 			r.OK = true
 			r.AlreadyChecked = true
-			r.Msg = "今日已签到（积分已在早先签到到账）"
-			// 但"已签到"标记**不等于**额度已到账 —— 上游可能出现
-			// "标记为已签却没发额度包"的状态（实测见过）。下面用权益包对账，
-			// 若发现今天根本没发过包，就把提示改成诚实的说法。
-			if g, amt, gerr := s.currentDayGrant(a); gerr == nil && !g {
+			r.Msg = "今日已签到（本次无新增积分）"
+
+			g, amt, gerr := s.currentDayGrant(a)
+			switch {
+			case gerr != nil:
+				// 对账失败（网络/字段变更）：给中性文案，不谎报也不断言失败
+				r.Msg = "今日已签到（未能确认到账情况）"
+				log.Printf("checkin grant-check-failed platform=%s uid=%s err=%v", name, uid, gerr)
+			case g:
+				r.Msg = fmt.Sprintf("今日已签到（今日已到账 %.0f 积分）", amt)
+				log.Printf("checkin grant-ok platform=%s uid=%s 今日签到到账=%v", name, uid, amt)
+			default:
+				// 标记已签，但今天确实没查到签到包 -> 如实告知未到账
 				r.GrantMissing = true
-				r.Msg = "今日签到标记已完成，但未查到新增额度（今日无新到账积分）"
-				log.Printf("checkin grant-missing platform=%s uid=%s（标记已签但今日无新建权益包）", name, uid)
-			} else if gerr == nil && g {
-				log.Printf("checkin grant-ok platform=%s uid=%s 今日到账=%v", name, uid, amt)
+				r.Msg = "今日已签到，但未查到新增积分（今日额度未增加）"
+				log.Printf("checkin grant-missing platform=%s uid=%s（标记已签但今日签到包不存在）", name, uid)
 			}
 		} else if isRateLimited(checkinErr) {
 			// 上游 9074：设备号未被认作已注册设备。**不是限流**，

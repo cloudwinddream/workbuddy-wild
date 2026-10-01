@@ -541,17 +541,26 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c
 //	  这在 v0.5.1/v0.5.2 里被当成"解析失败"，是 150/不可用 问题的另一处根源。
 //
 // 返回值为整数（官网也是整数展示）；小数部分四舍五入。
-// CurrentDayGrant 报告该账号**今天**是否真的收到了新的签到额度包。
+// CurrentDayGrant 报告该账号**今天**是否真的收到了新的**签到**额度包。
 //
 // 为什么需要它：`did_checked_in` 只是"签到标记"，并**不保证额度到账**。
-// 实测（2026-09-30）账号1 全天 did_checked_in=true，却查不到任何今日新建权益包，
-// 积分也确实没涨。若只看状态标志，会把这种"标记成功但没发额度"的异常
-// 误报成"签到成功"—— 用户看到的就是"提示签到成功但积分没变"。
+// 实测（2026-10-01）账号2 的 did_checked_in 在签到前就是 true，且当天
+// 查不到任何签到包、积分也一分没涨 —— 只看状态标志必然误报"签到成功"。
 //
-// 判据：权益包里存在 `start_time` 落在**今天**、且带 credits_limit 的包。
-// 签到时上游会新建一个包（实测 limit=100 或 150，有效期约 31 天）。
+// ⚠️ 关键修正（v0.6.5）：**不能把"今天的任意新包"都当成签到到账**。
+// 每月 1 日上游会自动发一个月度包（实测 limit=500 @00:00:00），
+// 它的 start_time 也落在今天。若把它算进来，会把"月初发放"误报成"签到到账"。
+// 实测该 bug：账号2 今日只拿到月初 500 包，却被报成"签到到账 500"。
 //
-// 返回 (是否有今日新包, 今日新包的总额度, error)。
+// 因此必须按**时间窗 + 金额特征**识别真正的签到包：
+//   - 签到包额度是小额（实测 100，历史上也见过 150）
+//   - 签到包的 start_time 应贴近**本次签到时刻**，而不是凌晨整点
+//
+// 判据：取 start_time 在 [今天, 今天+1天) 且**小时数不在 0~1 之间**
+// （避开月初/日初的定时发放），并且额度 ≤ checkinGrantMaxCredits 的包。
+// 这样月末（月初包已过期）与月初（月初包与签到包并存）两种情况都能正确区分。
+//
+// 返回 (是否有签到到账, 到账额度, error)。
 func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCurrentEntList, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -568,6 +577,8 @@ func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, er
 	}
 	packs := findPackList(raw)
 	y, m, d := time.Now().Date()
+
+	var ignoredBig []string
 	for _, p := range packs {
 		flat := map[string]any{}
 		flattenInto(p, flat, 0)
@@ -589,25 +600,48 @@ func (c *Client) CurrentDayGrant(a *auth.Auth) (granted bool, amount float64, er
 		if st > 1e12 {
 			st /= 1000
 		}
-		sy, sm, sd := time.Unix(st, 0).Date()
+		t := time.Unix(st, 0)
+		sy, sm, sd := t.Date()
 		if sy != y || sm != m || sd != d {
 			continue
 		}
-		// 必须是 credits 型包（有 credits_limit）
+
+		// 额度
+		var lim float64
 		for _, k := range limitFieldNames {
 			if v, ok := flat[k]; ok {
 				if n, ok := toFloat64(v); ok && n > 0 {
-					granted = true
-					amount += n
+					lim = n
 					break
 				}
 			}
 		}
+		if lim <= 0 {
+			continue
+		}
+
+		// ① 时间窗：排除凌晨整点的定时发放（月初包实测 00:00:00）
+		if t.Hour() < scheduledGrantMaxHour {
+			ignoredBig = append(ignoredBig, fmt.Sprintf("%.0f@%s(定时发放)", lim, t.Format("15:04:05")))
+			continue
+		}
+		// ② 金额：签到是小额；大额包（如月度 4000/500 订阅）不算
+		if lim > checkinGrantMaxCredits {
+			ignoredBig = append(ignoredBig, fmt.Sprintf("%.0f@%s(大额)", lim, t.Format("15:04:05")))
+			continue
+		}
+		granted = true
+		amount += lim
 	}
+
 	if granted {
-		log.Printf("traework grant uid=%s 今日新到账额度=%v", a.UID, amount)
+		log.Printf("traework grant uid=%s 今日签到到账=%v", a.UID, amount)
 	} else {
-		log.Printf("traework grant uid=%s 今日无新建权益包（额度未到账）", a.UID)
+		if len(ignoredBig) > 0 {
+			log.Printf("traework grant uid=%s 今日无签到包（已排除非签到发放: %v）", a.UID, ignoredBig)
+		} else {
+			log.Printf("traework grant uid=%s 今日无任何新建权益包（签到额度未到账）", a.UID)
+		}
 	}
 	return granted, amount, nil
 }
