@@ -15,22 +15,31 @@
 ## 一、部署步骤
 
 ```bash
-# 1. 改密钥
-vim docker-compose.yml   # 把 WB2A_API_KEY 换成强随机值
+# 1. 克隆 fork 仓库
+git clone https://github.com/cloudwinddream/workbuddy-wild.git
+cd workbuddy-wild
 
-# 2. 构建并启动
+# 2. 改配置
+vim docker-compose.yml
+# WB2A_API_KEY：换成强随机值；可信内网调试可留空（留空=不鉴权，不再弹登录框）
+# WB2A_PUBLIC_URL：浏览器与服务器不在同一台机器时必填，
+#                 填浏览器里打开管理页的那个地址，如 http://192.168.1.10:7863
+#                 （SSH 端口转发场景可留空）
+
+# 3. 构建并启动
 docker compose up -d --build
 
-# 3. 看日志确认
+# 4. 看日志确认
 docker compose logs -f workbuddy-wild-web
 # 应看到：listening on :7863 / 管理页： http://<本机IP>:7863/
 
-# 4. 健康检查
+# 5. 健康检查
 curl http://127.0.0.1:7863/healthz   # → ok
 ```
 
-浏览器打开 `http://<服务器IP>:7863/`，首次会弹框要求输入 API Key
-（即 `WB2A_API_KEY` 的值，记在浏览器 sessionStorage，关标签页后需重输）。
+浏览器打开 `http://<服务器IP>:7863/`。若 `WB2A_API_KEY` 设了值，首次会弹框
+要求输入 API Key（记在浏览器 sessionStorage，关标签页后需重输）；
+若留空则直接进入管理页，不鉴权。
 
 ## 二、添加账号（两种方式）
 
@@ -51,8 +60,9 @@ curl http://127.0.0.1:7863/healthz   # → ok
   `http://127.0.0.1:7863`，要求**你的浏览器能直接访问服务端**。
   - 若做了 `ssh -L 7863:127.0.0.1:7863 user@server` 端口转发：浏览器访问
     `http://127.0.0.1:7863/`，回调天然可达，**不用改任何配置**；
-  - 若浏览器直接访问服务器内网 IP：在 `docker-compose.yml` 里设置
-    `WB2A_PUBLIC_URL=http://<服务器IP>:7863` 后重建容器；
+  - 若浏览器直接访问服务器 IP（最常见）：**必须**在 `docker-compose.yml`
+    里设置 `WB2A_PUBLIC_URL=http://<服务器IP>:7863` 后重建容器，
+    否则回调走 `127.0.0.1` 会打到你自己的电脑上，登录永远等不到结果；
   - Trae 是否接受非 localhost 回调地址**尚未用真实账号验证**，
     若登录卡在"等待回调"，请改用方式 B。
 
@@ -100,7 +110,7 @@ docker compose up -d --build
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `WB2A_LISTEN` | `:7863` | 监听地址；容器内保持 `:7863` |
-| `WB2A_API_KEY` | `WorkBuddy2API` | Bearer 密钥；**务必修改**；留空=不鉴权 |
+| `WB2A_API_KEY` | `WorkBuddy2API` | Bearer 密钥；**务必修改**；显式设为空字符串=不鉴权（直接进管理页）；变量完全不设置时才回退到默认值 |
 | `WB2A_AUTH_DIR` | `/data/auths` | 账号目录 |
 | `WB2A_STATE_FILE` | `/data/state.json` | 状态文件（实际落 `state-workbuddy.json` / `state-traework.json`） |
 | `WB2A_PUBLIC_URL` | 空 | TraeWork 登录回调基址（见方式 A） |
@@ -122,13 +132,16 @@ docker compose up -d --build
 | 接口 401 | Bearer 与 `WB2A_API_KEY` 不一致 |
 | 模型报 `no_healthy_account` | token 过期/被冷却，看日志 refresh 结果 |
 | TraeWork 登录卡在等待回调 | 见"方式 A"注意：回调地址浏览器不可达，或 Trae 不接受该回调地址，改用方式 B |
+| 点"复制链接"报错（clipboard 相关） | 旧版本的已知问题；`git pull` 后 `docker compose up -d --build` 重建即修复 |
+| 终端中文注释乱码 | 终端未按 UTF-8 解码：`export LANG=C.UTF-8 LC_ALL=C.UTF-8` 后重看 |
 | TraeWork 签到 9074 | 设备号校验：服务器上没有 Trae 客户端，只能用随机设备号重试；v0.6.9 已内置最多 8 次换号重试 |
 
 ## 七、已知限制（实测前请知悉）
 
-1. **TraeWork 网页登录尚未用真实账号端到端验证**：授权 URL 生成、
-   回调记录、轮询交换的链路已做通，但 Trae 是否接受非 localhost 的
-   `auth_callback_url`、以及服务器出口 IP 是否被限流，都需要真实账号实测。
+1. **网页登录**：WorkBuddy 的网页登录（复制授权链接 → 浏览器完成登录 →
+   服务端轮询确认）已用真实账号验证走通。TraeWork 的授权 URL 生成、
+   回调记录、轮询交换链路已做通，但 Trae 是否接受非 localhost 的
+   `auth_callback_url`、以及服务器出口 IP 是否被限流，仍需真实账号实测。
 2. **TraeWork 自动签到在服务器上依赖随机设备号**：v0.6.9 的换号重试
    （9074 瞬时限流 → 最多换 8 个号重试）在桌面端已验证有效，
    服务端行为一致，但多账号大并发下的长期表现待观察。

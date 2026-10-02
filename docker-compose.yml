@@ -28,7 +28,7 @@ services:
       WB2A_AUTH_DIR: "/data/auths"
       WB2A_STATE_FILE: "/data/state.json"
       # TraeWork 登录回调用：浏览器与服务端不在同一台机器时，
-      # 填浏览�器可访问的地址，如 http://192.168.1.10:7863
+      # 填浏览器可访问的地址，如 http://192.168.1.10:7863
       # （SSH 端口转发场景可留空，默认用 http://127.0.0.1:7863）
       WB2A_PUBLIC_URL: ""
       # 签到时间按此时区计算
