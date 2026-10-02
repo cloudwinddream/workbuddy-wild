@@ -33,7 +33,7 @@ services:
       WB2A_PUBLIC_URL: ""
       # 签到时间按此时区计算
       TZ: "Asia/Shanghai"
-      # ---- 福利吧论坛签到（Go 原生模块，独立管理页 http://<服务器IP>:7863/wnflb/）----
+      # ---- 福利吧论坛签到（Go 原生模块，签到中心 http://<服务器IP>:7863/checkin/）----
       # 账号也可在网页上直接登录；这里填了则容器首次启动时自动导入。
       # 推荐写在 .env 里（见 .env.example），不要直接提交到仓库。
       FORUM_USERNAME: "${FORUM_USERNAME:-}"
@@ -44,6 +44,16 @@ services:
       WNFLB_RUN_ON_STARTUP: "${WNFLB_RUN_ON_STARTUP:-true}"
       # 论坛基址（论坛换域名时改这里）
       WNFLB_BASE_URL: "${WNFLB_BASE_URL:-https://www.wnflb2023.com}"
+      # ---- 什么值得买签到（Go 原生模块，签到中心 http://<服务器IP>:7863/checkin/）----
+      # Cookie 也可在签到中心页面直接粘贴；这里填了则容器首次启动时自动导入。
+      # 推荐写在 .env 里（见 .env.example），不要直接提交到仓库。
+      SMZDM_COOKIE: "${SMZDM_COOKIE:-}"
+      # 签到时刻表（北京时间，逗号分隔）
+      SMZDM_CHECKIN_TIMES: "${SMZDM_CHECKIN_TIMES:-09:00}"
+      # 启动后是否先跑一次签到（true/false）
+      SMZDM_RUN_ON_STARTUP: "${SMZDM_RUN_ON_STARTUP:-true}"
+      # 接口基址（一般不用改）
+      SMZDM_BASE_URL: "${SMZDM_BASE_URL:-https://user-api.smzdm.com}"
     volumes:
       - ./data:/data
     healthcheck:

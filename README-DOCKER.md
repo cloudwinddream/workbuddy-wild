@@ -163,6 +163,13 @@ docker compose up -d --build
 协议逆向来自上游开源项目 https://github.com/fmdxx1991/wnflb-checkin，
 已完整移植为 Go 原生实现（`internal/wnflb`）。
 
+以及：**什么值得买**（`smzdm.com`，APP 签到接口）。
+协议逆向来自上游开源项目 https://github.com/enwaiax/smzdm-bot（Apache-2.0），
+仅移植其中的签到部分（`internal/smzdm`）：APP 请求签名、SK 动态生成、
+每日签到、签到奖励与连续签到额外奖励领取。
+认证方式为 APP 抓包 Cookie（须包含 `sess` 字段），无账号密码登录；
+Cookie 可在签到中心页面直接粘贴，也可走 `SMZDM_COOKIE` 环境变量。
+
 ```bash
 # 账号密码填在 .env 里（容器首次启动自动导入；也可在签到中心页面直接登录）
 cp .env.example .env

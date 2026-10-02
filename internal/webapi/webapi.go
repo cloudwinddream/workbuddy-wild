@@ -25,6 +25,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
+	"github.com/rockswang/workbuddy-wild/internal/smzdm"
 	"github.com/rockswang/workbuddy-wild/internal/wnflb"
 )
 
@@ -49,6 +50,10 @@ type Options struct {
 	// Wnflb 福利吧签到服务（nil 表示未启用）；WnflbTimes 为签到时刻表展示。
 	Wnflb      *wnflb.Service
 	WnflbTimes string
+
+	// Smzdm 什么值得买签到服务（nil 表示未启用）；SmzdmTimes 为签到时刻表展示。
+	Smzdm      *smzdm.Service
+	SmzdmTimes string
 
 	// SetListen 由宿主提供：热切换 HTTP 监听（语义同 app.SetListen，
 	// 失败保持原监听）。
@@ -79,6 +84,9 @@ type API struct {
 	wnflb      *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
 	wnflbTimes string         // 签到时刻表展示，如 "01:00,22:00"
 
+	smzdm      *smzdm.Service // 什么值得买签到（可为 nil 表示未启用）
+	smzdmTimes string         // 签到时刻表展示，如 "09:00"
+
 	checkins *checkin.Registry // 签到中心模块注册表
 }
 
@@ -107,6 +115,8 @@ func New(opts Options) *API {
 		apiKey:     opts.Config.APIKey,
 		wnflb:      opts.Wnflb,
 		wnflbTimes: opts.WnflbTimes,
+		smzdm:      opts.Smzdm,
+		smzdmTimes: opts.SmzdmTimes,
 	}
 	// 清理上次异常退出残留的登录态文件。
 	if fps, _ := filepath.Glob(filepath.Join(opts.StateDir, "weblogin-*.json")); len(fps) > 0 {
@@ -120,6 +130,9 @@ func New(opts Options) *API {
 	a.checkins = checkin.New()
 	if opts.Wnflb != nil {
 		a.checkins.Register(&wnflbModule{svc: opts.Wnflb, times: opts.WnflbTimes})
+	}
+	if opts.Smzdm != nil {
+		a.checkins.Register(smzdm.NewAdapter(opts.Smzdm, opts.SmzdmTimes))
 	}
 	return a
 }
@@ -146,6 +159,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/logs", a.withAuth(a.handleLogs))
 	mux.HandleFunc("GET /api/events", a.withAuth(a.handleEvents))
 	a.registerWnflb(mux)
+	a.registerSmzdm(mux)
 	a.registerCheckins(mux)
 }
 

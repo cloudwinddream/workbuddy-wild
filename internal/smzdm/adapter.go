@@ -1,0 +1,58 @@
+package smzdm
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/rockswang/workbuddy-wild/internal/checkin"
+)
+
+// Adapter 把 Service 接入签到中心注册表。
+type Adapter struct {
+	svc   *Service
+	times string
+}
+
+// NewAdapter 创建签到中心适配器。
+func NewAdapter(svc *Service, times string) *Adapter {
+	return &Adapter{svc: svc, times: times}
+}
+
+func (a *Adapter) ID() string   { return "smzdm" }
+func (a *Adapter) Name() string { return "什么值得买" }
+func (a *Adapter) Desc() string { return "什么值得买（smzdm.com）APP 每日签到" }
+
+func (a *Adapter) Summary() checkin.Summary {
+	st := a.svc.loadStatus()
+	cfg := a.svc.Configured()
+	points := ""
+	if st.LastGold > 0 {
+		points = fmt.Sprintf("+%d", st.LastGold)
+	}
+	next := checkin.NextRun(checkin.ParseTimes(a.times), time.Now())
+	nextStr := ""
+	if !next.IsZero() {
+		nextStr = next.Format("2006-01-02 15:04")
+	}
+	return checkin.Summary{
+		ID:         "smzdm",
+		Name:       "什么值得买",
+		Desc:       "什么值得买（smzdm.com）APP 每日签到",
+		Configured: cfg,
+		LoggedIn:   cfg, // Cookie 即登录态
+		Username:   a.svc.SmzdmID(),
+		Points:     points,
+		PointsName: "金币",
+		LastOK:     st.LastCheckinOK,
+		LastMsg:    st.LastMsg,
+		LastAt:     st.LastCheckinAt,
+		NextAt:     nextStr,
+		Times:      a.times,
+	}
+}
+
+func (a *Adapter) RunNow() (bool, string) {
+	msg := a.svc.AutoCheckin()
+	st := a.svc.loadStatus()
+	return st.LastCheckinOK, msg
+}

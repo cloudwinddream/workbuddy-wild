@@ -28,11 +28,13 @@ import (
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/checkin"
 	"github.com/rockswang/workbuddy-wild/internal/config"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
+	"github.com/rockswang/workbuddy-wild/internal/smzdm"
 	"github.com/rockswang/workbuddy-wild/internal/traework"
 	"github.com/rockswang/workbuddy-wild/internal/upstream"
 	"github.com/rockswang/workbuddy-wild/internal/webapi"
@@ -135,6 +137,20 @@ func main() {
 		}
 	}
 
+	// ---- 什么值得买签到（独立模块，单账号，Go 原生实现） ----
+	// 协议逆向来自 https://github.com/enwaiax/smzdm-bot（Apache-2.0），仅移植签到部分。
+	smzdmSvc := smzdm.New(filepath.Join(stateDir, "smzdm"), os.Getenv("SMZDM_BASE_URL"))
+	smzdmTimes := strings.TrimSpace(os.Getenv("SMZDM_CHECKIN_TIMES"))
+	if smzdmTimes == "" {
+		smzdmTimes = "09:00"
+	}
+	// .env 引导：无存档 Cookie 且给了 Cookie 时自动导入（网页提交仍可覆盖）。
+	if ck := strings.TrimSpace(os.Getenv("SMZDM_COOKIE")); ck != "" {
+		if smzdmSvc.ImportCookieFromEnv(ck) {
+			log.Printf("smzdm: 已从环境变量导入 Cookie")
+		}
+	}
+
 	api := webapi.New(webapi.Options{
 		Config: cfg, ConfigPath: *cfgPath,
 		Runtimes: map[provider.Kind]*webapi.Runtime{
@@ -146,6 +162,8 @@ func main() {
 		SetListen:  setListen,
 		Wnflb:      wnflbSvc,
 		WnflbTimes: wnflbTimes,
+		Smzdm:      smzdmSvc,
+		SmzdmTimes: smzdmTimes,
 	})
 	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("workbuddy", r) })
 	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("traework", r) })
@@ -170,7 +188,10 @@ func main() {
 	go trSch.Run(sctx)
 	// 福利吧每日签到（独立模块）。
 	wnflbRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("WNFLB_RUN_ON_STARTUP"))) != "false"
-	go wnflb.RunScheduler(sctx, wnflb.ParseTimes(wnflbTimes), wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)
+	go checkin.RunScheduler(sctx, checkin.ParseTimes(wnflbTimes), wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)
+	// 什么值得买每日签到（独立模块）。
+	smzdmRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("SMZDM_RUN_ON_STARTUP"))) != "false"
+	go checkin.RunScheduler(sctx, checkin.ParseTimes(smzdmTimes), smzdmRunOnStartup, "什么值得买签到", smzdmSvc.AutoCheckin)
 
 	// ---- HTTP 服务 ----
 	if err := setListen(cfg.Listen.Host, cfg.Listen.Port); err != nil {

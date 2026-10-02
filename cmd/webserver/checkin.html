@@ -116,6 +116,9 @@
       if (m.id === "wnflb" && m.logged_in) {
         h += '<button data-act="logout" class="ghost">退出登录</button>';
       }
+      if (m.id === "smzdm" && m.logged_in) {
+        h += '<button data-act="smzdm-logout" class="ghost">清除 Cookie</button>';
+      }
       h += '</div>';
       // 福利吧登录表单（未登录时展开）
       if (m.id === "wnflb" && !m.logged_in) {
@@ -128,6 +131,15 @@
           '<img class="captchaImg" id="wnflbCaptchaImg" alt="验证码">' +
           '<input type="text" id="wnflbCaptchaCode" placeholder="输入验证码" autocomplete="off">' +
           '<div><button data-act="captcha">提交验证码</button></div></div></div>';
+      }
+      // 什么值得买 Cookie 表单（未配置时展开）
+      if (m.id === "smzdm" && !m.logged_in) {
+        h += '<div class="loginForm"><div style="font-weight:600;margin-bottom:4px">Cookie 配置</div>' +
+          '<div style="font-size:12px;color:#888;margin-bottom:4px">从什么值得买 APP 抓包获取完整 Cookie（须包含 sess 字段），粘贴到下方：</div>' +
+          '<textarea id="smzdmCookie" rows="3" style="width:100%;padding:9px 10px;font-size:12px;' +
+          'border:1px solid #d9d9d9;border-radius:6px;font-family:monospace" ' +
+          'placeholder="sess=...; smzdm_id=...; device_id=...; ..."></textarea>' +
+          '<div><button data-act="smzdm-save">保存 Cookie</button></div></div>';
       }
       h += '<div class="msg" data-msg="' + esc(m.id) + '"></div>';
       h += '</div>';
@@ -200,6 +212,21 @@
         modMsg(mid, "已退出登录", true);
         refresh();
       } catch (e) { if (e.message !== "401") modMsg(mid, "退出失败：" + e.message, false); }
+    } else if (act === "smzdm-save") {
+      var ck = $("smzdmCookie").value.trim();
+      if (!ck) { modMsg(mid, "请粘贴 Cookie", false); return; }
+      modMsg(mid, "保存中…");
+      try {
+        var r4 = await api("POST", "/api/smzdm/cookie", { cookie: ck });
+        if (r4.ok) { modMsg(mid, "Cookie 已保存" + (r4.smzdm_id ? "（" + r4.smzdm_id + "）" : ""), true); refresh(); return; }
+        modMsg(mid, r4.msg || "保存失败", false);
+      } catch (e) { if (e.message !== "401") modMsg(mid, "保存失败：" + e.message, false); }
+    } else if (act === "smzdm-logout") {
+      try {
+        await api("POST", "/api/smzdm/logout");
+        modMsg(mid, "已清除 Cookie", true);
+        refresh();
+      } catch (e) { if (e.message !== "401") modMsg(mid, "清除失败：" + e.message, false); }
     }
   }
 

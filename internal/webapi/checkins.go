@@ -30,7 +30,7 @@ func (m *wnflbModule) Summary() checkin.Summary {
 	if hasAccount {
 		loggedIn, points = m.svc.HomeStatus()
 	}
-	next := wnflb.NextRun(wnflb.ParseTimes(m.times), time.Now())
+	next := checkin.NextRun(checkin.ParseTimes(m.times), time.Now())
 	nextStr := ""
 	if !next.IsZero() {
 		nextStr = next.Format("2006-01-02 15:04")

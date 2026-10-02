@@ -1,4 +1,4 @@
-package wnflb
+package checkin
 
 import (
 	"context"
@@ -49,15 +49,15 @@ func ParseTimes(s string) []string {
 // RunScheduler 每日定时调度：按 times 执行 fn；runOnStartup 为 true 时
 // 启动后先执行一次。ctx 取消时退出。
 func RunScheduler(ctx context.Context, times []string, runOnStartup bool, name string, fn func() string) {
-	log.Printf("wnflb: 定时调度启动，时刻表 %v", times)
+	log.Printf("[%s] 定时调度启动，时刻表 %v", name, times)
 	if runOnStartup {
-		log.Printf("wnflb: 启动后先执行一次%s", name)
-		log.Printf("wnflb: %s结果: %s", name, fn())
+		log.Printf("[%s] 启动后先执行一次", name)
+		log.Printf("[%s] 结果: %s", name, fn())
 	}
 	for {
 		next := NextRun(times, time.Now())
 		if next.IsZero() {
-			log.Printf("wnflb: 时刻表无效，1 小时后重试")
+			log.Printf("[%s] 时刻表无效，1 小时后重试", name)
 			if !sleepCtx(ctx, time.Hour) {
 				return
 			}
@@ -67,12 +67,12 @@ func RunScheduler(ctx context.Context, times []string, runOnStartup bool, name s
 		if wait < 0 {
 			wait = 0
 		}
-		log.Printf("wnflb: 下次%s：%s（%s后）", name, next.Format("2006-01-02 15:04"), fmtDur(wait))
+		log.Printf("[%s] 下次执行：%s（%s后）", name, next.Format("2006-01-02 15:04"), fmtDur(wait))
 		if !sleepCtx(ctx, wait) {
-			log.Printf("wnflb: 调度退出")
+			log.Printf("[%s] 调度退出", name)
 			return
 		}
-		log.Printf("wnflb: %s结果: %s", name, fn())
+		log.Printf("[%s] 结果: %s", name, fn())
 	}
 }
 
