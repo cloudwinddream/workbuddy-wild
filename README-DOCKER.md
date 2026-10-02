@@ -150,3 +150,33 @@ docker compose up -d --build
    其余配置（签到时间、API-Key、策略、监听地址）即时生效。
 5. 管理页是"桌面版前端 + 兼容垫片"，首次加载需请求 `/shim.js`；
    离线内网使用无影响（全部资源同源，无外部 CDN）。
+
+## 八、福利吧论坛签到（wnflb-checkin sidecar）
+
+`docker-compose.yml` 里自带一个**独立**的签到容器，跑的是上游开源项目
+https://github.com/fmdxx1991/wnflb-checkin
+（福利吧论坛 `wnflb2023.com` 的每日签到，Discuz! X3.4 + `fx_checkin` 插件）。
+它与上面的 AI 账号签到完全分开：独立容器、独立定时、独立账号数据。
+
+```bash
+# 1. 配账号（.env 不会被 git 提交）
+cp .env.example .env
+vim .env   # 填 FORUM_USERNAME / FORUM_PASSWORD
+
+# 2. 启动（主服务 + 签到 sidecar 一起起来）
+docker compose up -d --build
+
+# 3. 看日志 / 手动触发一次
+docker compose logs -f wnflb-checkin
+docker compose exec wnflb-checkin python3 /app/wnflb_checkin.py
+```
+
+说明：
+
+- 默认每天 **01:00 / 22:00**（北京时间）签到，`WNFLB_CHECKIN_TIMES` 可改；
+  容器启动后默认先跑一次（`WNFLB_RUN_ON_STARTUP` 可关）。
+- 首次用账号密码登录（新 IP 验证码由 ddddocr 自动识别，已预装），
+  Cookie 存 `./wnflb-data/cookies.json`，之后复用、过期自动重登。
+- 签到成功/失败可走 PushPlus / Server酱微信推送（`.env` 里配）。
+- 不想用它：把 `docker-compose.yml` 里 `wnflb-checkin` 那一段删掉即可，
+  主服务不受影响。

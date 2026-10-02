@@ -1,6 +1,8 @@
 # Auth & secrets
 auths/
 data/
+wnflb-data/
+.env
 *.key
 *.pem
 

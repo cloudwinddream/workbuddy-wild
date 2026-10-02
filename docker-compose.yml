@@ -41,3 +41,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # ------------------------------------------------------------------
+  # 福利吧论坛自动签到（sidecar）
+  # 上游：https://github.com/fmdxx1991/wnflb-checkin
+  # 独立容器、独立定时（默认每天 01:00 / 22:00 北京时间）、独立账号，
+  # 与 workbuddy-wild-web 的 AI 账号签到互不干扰。
+  # 账号密码填在 .env 里（见 .env.example），不要写进仓库文件。
+  # ------------------------------------------------------------------
+  wnflb-checkin:
+    build:
+      context: ./wnflb
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: wnflb-checkin:latest
+    container_name: wnflb-checkin
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      FORUM_USERNAME: "${FORUM_USERNAME:-}"
+      FORUM_PASSWORD: "${FORUM_PASSWORD:-}"
+      # FORUM_COOKIE: "${FORUM_COOKIE:-}"      # 可选：直接给 Cookie，优先级高于账号密码
+      # PUSHPLUS_TOKEN: "${PUSHPLUS_TOKEN:-}"  # 可选：微信推送
+      # SERVERCHAN_KEY: "${SERVERCHAN_KEY:-}"  # 可选：微信推送
+      CHECKIN_TIMES: "${WNFLB_CHECKIN_TIMES:-01:00,22:00}"
+      RUN_ON_STARTUP: "${WNFLB_RUN_ON_STARTUP:-true}"
+      COOKIE_FILE: "/app/data/cookies.json"
+    volumes:
+      - ./wnflb-data:/app/data
