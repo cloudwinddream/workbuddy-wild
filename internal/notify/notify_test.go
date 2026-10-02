@@ -92,6 +92,64 @@ func TestBarkHTTPError(t *testing.T) {
 	}
 }
 
+func TestBarkAccountKeyResolution(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(raw, &m)
+		got = append(got, m)
+		_, _ = w.Write([]byte(`{"code":200,"message":"success"}`))
+	}))
+	defer srv.Close()
+
+	b, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(Config{
+		Server:      srv.URL,
+		DefaultKey:  "defaultkey",
+		ModuleKeys:  map[string]string{"workbuddy": "wbplatformkey"},
+		AccountKeys: map[string]string{"workbuddy:u1": "u1key"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 账号级 key 优先
+	if err := b.SendAccountSync("workbuddy", "u1", "t", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["device_key"] != "u1key" {
+		t.Errorf("账号级 = %v", got)
+	}
+	// 同平台其他账号走平台 key
+	got = nil
+	if err := b.SendAccountSync("workbuddy", "u2", "t", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["device_key"] != "wbplatformkey" {
+		t.Errorf("平台级 = %v", got)
+	}
+	// 其他平台走默认 key
+	got = nil
+	if err := b.SendAccountSync("traework", "u9", "t", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0]["device_key"] != "defaultkey" {
+		t.Errorf("默认级 = %v", got)
+	}
+	// KeyForAccount 逐级回退
+	if b.KeyForAccount("workbuddy", "u1") != "u1key" ||
+		b.KeyForAccount("workbuddy", "u2") != "wbplatformkey" ||
+		b.KeyForAccount("traework", "u9") != "defaultkey" {
+		t.Error("KeyForAccount 回退链错误")
+	}
+	if !b.EnabledAccount("workbuddy", "u1") {
+		t.Error("EnabledAccount 应为 true")
+	}
+}
+
 func TestMask(t *testing.T) {
 	if mask("") != "" || mask("short") != "****" {
 		t.Error("mask 边界错误")

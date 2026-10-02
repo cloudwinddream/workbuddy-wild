@@ -58,6 +58,22 @@
     </div>
     <div class="msg" id="notifyMsg"></div>
   </div>
+  <div class="card" id="settingsCard">
+    <h2>统一签到设置（WorkBuddy / TraeWork）</h2>
+    <div class="desc">两个平台共用一套签到时间；修改后即时生效，无需重启</div>
+    <div style="font-size:13px;color:#888">每日签到时间（逗号分隔，如 08:30,20:30）</div>
+    <input type="text" id="checkinTimes" placeholder="09:00">
+    <div>
+      <button id="btnSaveTimes">保存签到时间</button>
+    </div>
+    <div id="settingsInfo" style="font-size:13px;color:#888;margin-top:6px"></div>
+    <div class="msg" id="settingsMsg"></div>
+  </div>
+  <h2 style="font-size:16px;margin:18px 0 8px">WorkBuddy 账号</h2>
+  <div id="wbAccounts"></div>
+  <h2 style="font-size:16px;margin:18px 0 8px">TraeWork 账号</h2>
+  <div id="twAccounts"></div>
+  <h2 style="font-size:16px;margin:18px 0 8px">第三方签到</h2>
   <div id="modules"></div>
   <div id="globalMsg" class="msg"></div>
 </div>
@@ -277,6 +293,8 @@
       render(r.modules || []);
     } catch (e) { if (e.message !== "401") say("加载失败：" + e.message, false); }
     loadNotify();
+    loadSettings();
+    loadAccounts();
   }
 
   // ---- Bark 通知设置 ----
@@ -349,6 +367,126 @@
         var r3 = await api("POST", "/api/notify/test", { module: mid });
         modMsg(mid, r3.msg || "已发送", r3.ok);
       } catch (e) { if (e.message !== "401") modMsg(mid, "发送失败：" + e.message, false); }
+    }
+  }
+
+  // ---- 统一签到设置 ----
+  function settingsSay(t, ok) {
+    var m = $("settingsMsg");
+    if (!m) return;
+    m.textContent = t;
+    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+  }
+
+  async function loadSettings() {
+    try {
+      var r = await api("GET", "/api/checkins/settings");
+      var times = (r.checkin_times || []).join(",");
+      var input = $("checkinTimes");
+      if (document.activeElement !== input) input.value = times;
+      var info = "下次统一签到：" + (r.next_fire || "—") +
+        " · 保活时间：" + ((r.keepalive_hours || []).join(",") || "—") +
+        "<br>启动兜底补签：" + (r.catchup_on_startup ? "开启" : "关闭") +
+        " · " + esc(r.retry_policy || "");
+      $("settingsInfo").innerHTML = info;
+    } catch (e) { /* 静默 */ }
+  }
+
+  $("btnSaveTimes").onclick = async function () {
+    var v = $("checkinTimes").value.trim();
+    var times = v ? v.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    try {
+      var r = await api("PUT", "/api/config", { checkin_times: times });
+      settingsSay(r.ok === false ? (r.msg || "保存失败") : "签到时间已保存", r.ok !== false);
+      loadSettings();
+    } catch (e) { if (e.message !== "401") settingsSay("保存失败：" + e.message, false); }
+  };
+
+  // ---- AI 账号（WorkBuddy / TraeWork）----
+  function acctMsg(el, t, ok) {
+    if (!el) return;
+    el.textContent = t;
+    el.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+  }
+
+  function renderAccounts(list) {
+    function card(v) {
+      var name = v.nickname || ("账号 " + String(v.uid).slice(0, 8));
+      var h = '<div class="card" data-acct="' + esc(v.group + ":" + v.uid) + '">';
+      h += '<h2>' + esc(name) + '</h2><div class="desc">' +
+        (v.group === "workbuddy" ? "WorkBuddy" : "TraeWork") +
+        (v.disabled ? ' · <span class="bad">已禁用</span>' : '') + '</div>';
+      h += '<div class="row"><span class="k">当前积分</span><span class="v">' + esc(v.credits) + '</span></div>';
+      h += '<div class="row"><span class="k">上次签到</span><span class="v">' +
+        (v.last_checkin_at ? esc(v.last_checkin_at) + ' · ' +
+          (v.last_checkin_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
+          (v.last_checkin_msg ? ' ' + esc(v.last_checkin_msg) : '') : "—") + '</span></div>';
+      h += '<div style="margin-top:8px"><button data-aact="run">立即签到</button></div>';
+      h += '<div class="loginForm"><div style="font-size:13px;color:#888">Bark 设备 Key（可选，留空用默认设备；当前：' +
+        (v.bark_set ? "已设置 " + esc(v.bark_key || "") : "未设置（用默认）") + '）</div>' +
+        '<input type="password" data-abark placeholder="留空 = 不修改" autocomplete="off">' +
+        '<div><button data-aact="bark-save" class="ghost">保存 Bark 设置</button>' +
+        '<button data-aact="bark-test" class="ghost">测试此设备</button>' +
+        '<button data-aact="bark-clear" class="ghost">清除</button></div></div>';
+      h += '<div class="msg" data-amsg></div></div>';
+      return h;
+    }
+    var wb = list.filter(function (v) { return v.group === "workbuddy"; });
+    var tw = list.filter(function (v) { return v.group === "traework"; });
+    $("wbAccounts").innerHTML = wb.length ? wb.map(card).join("") :
+      '<div class="card empty">暂无 WorkBuddy 账号</div>';
+    $("twAccounts").innerHTML = tw.length ? tw.map(card).join("") :
+      '<div class="card empty">暂无 TraeWork 账号</div>';
+    document.querySelectorAll("[data-aact]").forEach(function (btn) {
+      btn.onclick = function () { acctAction(btn); };
+    });
+  }
+
+  async function loadAccounts() {
+    try {
+      var r = await api("GET", "/api/checkins/accounts");
+      renderAccounts(r.accounts || []);
+    } catch (e) { /* 静默 */ }
+  }
+
+  async function acctAction(btn) {
+    var card = btn.closest(".card");
+    var acct = card.getAttribute("data-acct"); // platform:uid
+    var uid = acct.slice(acct.indexOf(":") + 1);
+    var msgEl = card.querySelector("[data-amsg]");
+    var act = btn.getAttribute("data-aact");
+    if (act === "run") {
+      btn.disabled = true;
+      acctMsg(msgEl, "签到中…");
+      try {
+        var r = await api("POST", "/api/checkin/account", { uid: uid });
+        acctMsg(msgEl, r.msg || (r.ok ? "完成" : "失败"), r.ok);
+      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "请求失败：" + e.message, false); }
+      btn.disabled = false;
+      loadAccounts();
+    } else if (act === "bark-save") {
+      var input = card.querySelector("[data-abark]");
+      var v = input ? input.value.trim() : "";
+      if (!v) { acctMsg(msgEl, "请先输入新的 Bark Key（留空不会修改）", false); return; }
+      var accts = {}; accts[acct] = v;
+      try {
+        var r2 = await api("PUT", "/api/notify/config", { accounts: accts });
+        acctMsg(msgEl, r2.msg || "已保存", r2.ok);
+        if (r2.ok) { input.value = ""; loadAccounts(); }
+      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "保存失败：" + e.message, false); }
+    } else if (act === "bark-clear") {
+      var accts2 = {}; accts2[acct] = "CLEAR";
+      try {
+        var r3 = await api("PUT", "/api/notify/config", { accounts: accts2 });
+        acctMsg(msgEl, r3.msg || "已清除", r3.ok);
+        if (r3.ok) loadAccounts();
+      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "清除失败：" + e.message, false); }
+    } else if (act === "bark-test") {
+      acctMsg(msgEl, "发送中…");
+      try {
+        var r4 = await api("POST", "/api/notify/test", { account: acct });
+        acctMsg(msgEl, r4.msg || "已发送", r4.ok);
+      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "发送失败：" + e.message, false); }
     }
   }
 

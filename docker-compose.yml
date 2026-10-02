@@ -33,6 +33,8 @@ services:
       WB2A_PUBLIC_URL: ""
       # 签到时间按此时区计算
       TZ: "Asia/Shanghai"
+      # 主账号启动兜底补签（错过签到时刻且今日未签时启动后补签；true/false）
+      WB2A_CATCHUP_ON_STARTUP: "${WB2A_CATCHUP_ON_STARTUP:-true}"
       # ---- 福利吧论坛签到（Go 原生模块，签到中心 http://<服务器IP>:7863/checkin/）----
       # 账号也可在网页上直接登录；这里填了则容器首次启动时自动导入。
       # 推荐写在 .env 里（见 .env.example），不要直接提交到仓库。

@@ -25,9 +25,10 @@ const DefaultServer = "https://api.day.app"
 
 // Config 通知配置。
 type Config struct {
-	Server     string            `json:"server"`      // Bark 服务器，如 https://api.day.app（可自建）
-	DefaultKey string            `json:"default_key"` // 默认设备 key
-	ModuleKeys map[string]string `json:"module_keys"` // 模块ID → 设备 key（覆盖默认）
+	Server      string            `json:"server"`       // Bark 服务器，如 https://api.day.app（可自建）
+	DefaultKey  string            `json:"default_key"`  // 默认设备 key
+	ModuleKeys  map[string]string `json:"module_keys"`  // 模块ID → 设备 key（覆盖默认）
+	AccountKeys map[string]string `json:"account_keys"` // "platform:uid" → 设备 key（覆盖平台默认）
 }
 
 // Bark Bark 推送客户端（线程安全，配置可热更新）。
@@ -47,9 +48,10 @@ func Open(dir string) (*Bark, error) {
 		http: &http.Client{Timeout: 15 * time.Second},
 	}
 	b.cfg = Config{
-		Server:     strings.TrimRight(strings.TrimSpace(os.Getenv("BARK_SERVER")), "/"),
-		DefaultKey: strings.TrimSpace(os.Getenv("BARK_KEY")),
-		ModuleKeys: map[string]string{},
+		Server:      strings.TrimRight(strings.TrimSpace(os.Getenv("BARK_SERVER")), "/"),
+		DefaultKey:  strings.TrimSpace(os.Getenv("BARK_KEY")),
+		ModuleKeys:  map[string]string{},
+		AccountKeys: map[string]string{},
 	}
 	if b.cfg.Server == "" {
 		b.cfg.Server = DefaultServer
@@ -65,6 +67,9 @@ func Open(dir string) (*Bark, error) {
 			if b.cfg.ModuleKeys == nil {
 				b.cfg.ModuleKeys = map[string]string{}
 			}
+			if b.cfg.AccountKeys == nil {
+				b.cfg.AccountKeys = map[string]string{}
+			}
 		}
 	}
 	return b, nil
@@ -78,6 +83,10 @@ func (b *Bark) snapshot() Config {
 	out.ModuleKeys = make(map[string]string, len(b.cfg.ModuleKeys))
 	for k, v := range b.cfg.ModuleKeys {
 		out.ModuleKeys[k] = v
+	}
+	out.AccountKeys = make(map[string]string, len(b.cfg.AccountKeys))
+	for k, v := range b.cfg.AccountKeys {
+		out.AccountKeys[k] = v
 	}
 	return out
 }
@@ -93,6 +102,9 @@ func (b *Bark) Update(c Config) error {
 	c.Server = strings.TrimRight(strings.TrimSpace(c.Server), "/")
 	if c.ModuleKeys == nil {
 		c.ModuleKeys = map[string]string{}
+	}
+	if c.AccountKeys == nil {
+		c.AccountKeys = map[string]string{}
 	}
 	b.mu.Lock()
 	b.cfg = c
@@ -110,8 +122,26 @@ func (b *Bark) KeyFor(moduleID string) string {
 	return strings.TrimSpace(c.DefaultKey)
 }
 
+// KeyForAccount 返回账号生效的 key（账号覆盖 → 平台覆盖 → 默认）。
+// platform: workbuddy / traework；uid 为账号唯一标识。
+func (b *Bark) KeyForAccount(platform, uid string) string {
+	c := b.snapshot()
+	if k := strings.TrimSpace(c.AccountKeys[platform+":"+uid]); k != "" {
+		return k
+	}
+	if k := strings.TrimSpace(c.ModuleKeys[platform]); k != "" {
+		return k
+	}
+	return strings.TrimSpace(c.DefaultKey)
+}
+
 // Enabled 模块是否已配置推送。
 func (b *Bark) Enabled(moduleID string) bool { return b.KeyFor(moduleID) != "" }
+
+// EnabledAccount 账号是否已配置推送。
+func (b *Bark) EnabledAccount(platform, uid string) bool {
+	return b.KeyForAccount(platform, uid) != ""
+}
 
 // View 返回给管理页的配置视图（key 脱敏）。
 func (b *Bark) View() map[string]any {
@@ -120,11 +150,16 @@ func (b *Bark) View() map[string]any {
 	for id, k := range c.ModuleKeys {
 		mods[id] = map[string]any{"key": mask(k), "set": k != ""}
 	}
+	accts := map[string]any{}
+	for id, k := range c.AccountKeys {
+		accts[id] = map[string]any{"key": mask(k), "set": k != ""}
+	}
 	return map[string]any{
 		"server":      c.Server,
 		"default_key": mask(c.DefaultKey),
 		"default_set": c.DefaultKey != "",
 		"modules":     mods,
+		"accounts":    accts,
 	}
 }
 
@@ -152,16 +187,33 @@ func (b *Bark) Send(moduleID, title, body string) {
 
 // SendSync 同步发送（测试推送用，需要把结果告诉用户）。
 func (b *Bark) SendSync(moduleID, title, body string) error {
-	return b.send(moduleID, title, body)
+	return b.sendTo(b.KeyFor(moduleID), title, body)
+}
+
+// SendAccount 向账号对应的 Bark 设备异步推送（未配置则跳过）。
+func (b *Bark) SendAccount(platform, uid, title, body string) {
+	go func() {
+		if err := b.SendAccountSync(platform, uid, title, body); err != nil {
+			fmt.Fprintf(os.Stderr, "notify: bark 推送失败 account=%s:%s: %v\n", platform, uid, err)
+		}
+	}()
+}
+
+// SendAccountSync 向账号对应的 Bark 设备同步推送（测试用）。
+func (b *Bark) SendAccountSync(platform, uid, title, body string) error {
+	return b.sendTo(b.KeyForAccount(platform, uid), title, body)
 }
 
 func (b *Bark) send(moduleID, title, body string) error {
-	c := b.snapshot()
-	key := b.KeyFor(moduleID)
+	return b.sendTo(b.KeyFor(moduleID), title, body)
+}
+
+// sendTo 向指定 key 推送；支持逗号分隔的多个设备 key，逐个发送。
+func (b *Bark) sendTo(key, title, body string) error {
 	if key == "" {
 		return fmt.Errorf("未配置 Bark key")
 	}
-	// 支持逗号分隔的多个设备 key，逐个发送。
+	c := b.snapshot()
 	keys := strings.Split(key, ",")
 	var firstErr error
 	for _, k := range keys {

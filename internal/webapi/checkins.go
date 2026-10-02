@@ -60,6 +60,8 @@ func (m *wnflbModule) RunNow() (bool, string) {
 func (a *API) registerCheckins(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/checkins", a.withAuth(a.handleCheckinList))
 	mux.HandleFunc("POST /api/checkins/{id}/run", a.withAuth(a.handleCheckinRun))
+	mux.HandleFunc("GET /api/checkins/accounts", a.withAuth(a.handleCheckinAccounts))
+	mux.HandleFunc("GET /api/checkins/settings", a.withAuth(a.handleCheckinSettings))
 }
 
 // GET /api/checkins → {modules: [Summary...]}

@@ -48,21 +48,21 @@ const (
 
 // retryState 单个账号的限流重试状态。
 type retryState struct {
-	count    int       // 已安排的延迟重试次数（当天）
-	lastDay  int       // 归属日期（一年中的第几天），跨天重置
-	nextAt   time.Time // 下次重试时刻
-	pending  bool      // 是否有待执行的重试
+	count   int       // 已安排的延迟重试次数（当天）
+	lastDay int       // 归属日期（一年中的第几天），跨天重置
+	nextAt  time.Time // 下次重试时刻
+	pending bool      // 是否有待执行的重试
 }
 
 // Scheduler 调度器。
 type Scheduler struct {
-	mu        sync.Mutex                 // 保护 cfg 中的小时配置
+	mu        sync.Mutex // 保护 cfg 中的小时配置
 	cfg       Config
 	wake      chan struct{}              // 配置变更唤醒 Run 循环重算下次触发
 	onCheckin func(CheckinResult)        // 结果观察器，供 GUI 接收自动签到结果
 	onRefresh func(string, bool, string) // token 刷新结果观察器
 
-	retryMu sync.Mutex            // 保护 retries
+	retryMu sync.Mutex             // 保护 retries
 	retries map[string]*retryState // uid → 限流重试状态
 }
 
@@ -400,6 +400,56 @@ func (s *Scheduler) currentDayGrant(a *auth.Auth) (bool, float64, error) {
 		return false, 0, nil
 	}
 	return g.CurrentDayGrant(a)
+}
+
+// needsCatchUp 判断是否需要兜底补签：当前时刻已到/已过今天最早的
+// 签到时刻，且该账号今天还没有签到记录（含从未签到）。
+func needsCatchUp(lastCheckin, now time.Time, checkinMinutes []int) bool {
+	if len(checkinMinutes) == 0 {
+		return false
+	}
+	earliest := checkinMinutes[0]
+	for _, m := range checkinMinutes {
+		if m < earliest {
+			earliest = m
+		}
+	}
+	todayEarliest := time.Date(now.Year(), now.Month(), now.Day(), earliest/60, earliest%60, 0, 0, now.Location())
+	if now.Before(todayEarliest) {
+		return false
+	}
+	if lastCheckin.IsZero() {
+		return true
+	}
+	return lastCheckin.Year() != now.Year() || lastCheckin.YearDay() != now.YearDay()
+}
+
+// CatchUpMissed 兜底补签：服务启动时调用，对"已错过今日签到时刻
+// 且今日尚未签到"的账号补签一次（禁用的跳过）。无账号需要补签时
+// 不产生任何上游请求。
+func (s *Scheduler) CatchUpMissed() {
+	name := s.name()
+	minutes, _ := s.schedule()
+	now := time.Now()
+	var todo []string
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		if needsCatchUp(st.LastCheckinAt, now, minutes) {
+			todo = append(todo, st.UID)
+		}
+	}
+	if len(todo) == 0 {
+		log.Printf("checkin catchup none platform=%s", name)
+		return
+	}
+	log.Printf("checkin catchup start platform=%s accounts=%d", name, len(todo))
+	for _, uid := range todo {
+		r := s.checkinOne(uid)
+		log.Printf("checkin catchup result platform=%s uid=%s ok=%t msg=%s", name, uid, r.OK, r.Msg)
+	}
+	log.Printf("checkin catchup done platform=%s", name)
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。

@@ -168,13 +168,14 @@ func main() {
 			provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
 		},
 		Handler: h, Version: version, StateDir: stateDir,
-		PublicBase: publicBase(cfg),
-		SetListen:  setListen,
-		Wnflb:      wnflbSvc,
-		WnflbTimes: wnflbTimes,
-		Smzdm:      smzdmSvc,
-		SmzdmTimes: smzdmTimes,
-		Notify:     bark,
+		PublicBase:       publicBase(cfg),
+		SetListen:        setListen,
+		Wnflb:            wnflbSvc,
+		WnflbTimes:       wnflbTimes,
+		Smzdm:            smzdmSvc,
+		SmzdmTimes:       smzdmTimes,
+		Notify:           bark,
+		CatchupOnStartup: strings.ToLower(strings.TrimSpace(os.Getenv("WB2A_CATCHUP_ON_STARTUP"))) != "false",
 	})
 	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("workbuddy", r) })
 	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("traework", r) })
@@ -197,6 +198,20 @@ func main() {
 	defer stop()
 	go wbSch.Run(sctx)
 	go trSch.Run(sctx)
+	// 主账号兜底补签：启动后对"已错过签到时刻且今日未签"的账号补签
+	//（WB2A_CATCHUP_ON_STARTUP=false 可关）。
+	catchupOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("WB2A_CATCHUP_ON_STARTUP"))) != "false"
+	if catchupOnStartup {
+		go func() {
+			select {
+			case <-sctx.Done():
+				return
+			case <-time.After(15 * time.Second):
+			}
+			wbSch.CatchUpMissed()
+			trSch.CatchUpMissed()
+		}()
+	}
 	// 福利吧每日签到（独立模块）。
 	wnflbRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("WNFLB_RUN_ON_STARTUP"))) != "false"
 	go checkin.RunScheduler(sctx, checkin.ParseTimes(wnflbTimes), wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)

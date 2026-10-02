@@ -9,6 +9,7 @@ package webapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -59,6 +60,9 @@ type Options struct {
 	// Notify 签到结果 Bark 推送（nil 表示未启用）。
 	Notify *notify.Bark
 
+	// CatchupOnStartup 启动兜底补签是否开启（仅用于页面展示实际状态）。
+	CatchupOnStartup bool
+
 	// SetListen 由宿主提供：热切换 HTTP 监听（语义同 app.SetListen，
 	// 失败保持原监听）。
 	SetListen func(host string, port int) error
@@ -93,6 +97,8 @@ type API struct {
 
 	notify *notify.Bark // 签到结果 Bark 推送（可为 nil）
 
+	catchupOnStartup bool // 启动兜底补签开关（展示用）
+
 	checkins *checkin.Registry // 签到中心模块注册表
 }
 
@@ -125,6 +131,7 @@ func New(opts Options) *API {
 		smzdmTimes: opts.SmzdmTimes,
 		notify:     opts.Notify,
 	}
+	a.catchupOnStartup = opts.CatchupOnStartup
 	// 清理上次异常退出残留的登录态文件。
 	if fps, _ := filepath.Glob(filepath.Join(opts.StateDir, "weblogin-*.json")); len(fps) > 0 {
 		for _, fp := range fps {
@@ -237,6 +244,57 @@ func (a *API) NotifyCheckin(platform string, r scheduler.CheckinResult) {
 		"platform": platform, "uid": r.UID, "ok": r.OK, "retryable": r.Retryable,
 		"msg": r.Msg, "remain": r.Remain, "has_remain": r.HasRemain,
 	})
+	a.barkCheckin(platform, r)
+}
+
+// platformLabel 平台展示名。
+func platformLabel(platform string) string {
+	switch platform {
+	case "workbuddy":
+		return "WorkBuddy"
+	case "traework":
+		return "TraeWork"
+	}
+	return platform
+}
+
+// accountNickname 查账号昵称（找不到返回空）。
+func (a *API) accountNickname(uid string) string {
+	for _, s := range a.allStatuses() {
+		if s.UID == uid {
+			return s.Nickname
+		}
+	}
+	return ""
+}
+
+// barkCheckin 把主账号（WorkBuddy/TraeWork）签到结果推送到 Bark；
+// 每个账号可单独指定 Bark 设备（账号 → 平台 → 默认逐级回退）。
+func (a *API) barkCheckin(platform string, r scheduler.CheckinResult) {
+	n := a.notify
+	if n == nil || !n.EnabledAccount(platform, r.UID) {
+		return
+	}
+	label := platformLabel(platform)
+	title := label + "签到成功 ✅"
+	if r.AlreadyChecked {
+		title = label + "今日已签到 ✅"
+	}
+	if !r.OK {
+		title = label + "签到失败 ❌"
+	}
+	var b strings.Builder
+	if nick := a.accountNickname(r.UID); nick != "" {
+		b.WriteString("账号：" + nick + "\n")
+	}
+	b.WriteString(r.Msg)
+	if r.HasRemain {
+		fmt.Fprintf(&b, "\n当前积分：%d", r.Remain)
+	}
+	if r.GrantMissing {
+		b.WriteString("\n⚠️ 已标记签到，但未查到新增额度包")
+	}
+	n.SendAccount(platform, r.UID, title, b.String())
 }
 
 // NotifyRefresh token 刷新结果推送（供 scheduler.SetRefreshObserver 使用）。
