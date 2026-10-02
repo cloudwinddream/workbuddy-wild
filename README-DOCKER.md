@@ -185,3 +185,9 @@ docker compose up -d --build
 - 新 IP 首次登录若触发论坛验证码，页面会弹出验证码图片，手动输入即可。
 - 账号密码明文存于 `./data/wnflb/account.json`（0600 权限），与本项目
   auth 文件策略一致；`.env` 不会被 git 提交。
+
+**签到结果推送（Bark）**：签到中心顶部有「通知设置」——签到成功/失败后
+自动推送到 Bark（标题含成功/失败，正文含结果与积分变化/当前积分）。
+支持全局默认设备 + 每个签到账号单独指定设备；配置保存在
+`./data/notify/notify.json`。`BARK_KEY`/`BARK_SERVER` 环境变量仅作
+首次启动的默认值，自建 Bark 服务器改 `BARK_SERVER` 即可。

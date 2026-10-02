@@ -139,4 +139,3 @@ func TestDetectCaptcha(t *testing.T) {
 		t.Errorf("挑战解析错误: %+v", ch)
 	}
 }
-

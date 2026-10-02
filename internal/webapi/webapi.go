@@ -21,6 +21,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 	"github.com/rockswang/workbuddy-wild/internal/checkin"
 	"github.com/rockswang/workbuddy-wild/internal/config"
+	"github.com/rockswang/workbuddy-wild/internal/notify"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
@@ -55,6 +56,9 @@ type Options struct {
 	Smzdm      *smzdm.Service
 	SmzdmTimes string
 
+	// Notify 签到结果 Bark 推送（nil 表示未启用）。
+	Notify *notify.Bark
+
 	// SetListen 由宿主提供：热切换 HTTP 监听（语义同 app.SetListen，
 	// 失败保持原监听）。
 	SetListen func(host string, port int) error
@@ -87,6 +91,8 @@ type API struct {
 	smzdm      *smzdm.Service // 什么值得买签到（可为 nil 表示未启用）
 	smzdmTimes string         // 签到时刻表展示，如 "09:00"
 
+	notify *notify.Bark // 签到结果 Bark 推送（可为 nil）
+
 	checkins *checkin.Registry // 签到中心模块注册表
 }
 
@@ -117,6 +123,7 @@ func New(opts Options) *API {
 		wnflbTimes: opts.WnflbTimes,
 		smzdm:      opts.Smzdm,
 		smzdmTimes: opts.SmzdmTimes,
+		notify:     opts.Notify,
 	}
 	// 清理上次异常退出残留的登录态文件。
 	if fps, _ := filepath.Glob(filepath.Join(opts.StateDir, "weblogin-*.json")); len(fps) > 0 {
@@ -160,6 +167,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", a.withAuth(a.handleEvents))
 	a.registerWnflb(mux)
 	a.registerSmzdm(mux)
+	a.registerNotify(mux)
 	a.registerCheckins(mux)
 }
 

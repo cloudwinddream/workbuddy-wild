@@ -30,6 +30,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 	"github.com/rockswang/workbuddy-wild/internal/checkin"
 	"github.com/rockswang/workbuddy-wild/internal/config"
+	"github.com/rockswang/workbuddy-wild/internal/notify"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
@@ -151,6 +152,15 @@ func main() {
 		}
 	}
 
+	// ---- 签到结果 Bark 推送通知 ----
+	bark, barkErr := notify.Open(filepath.Join(stateDir, "notify"))
+	if barkErr != nil {
+		log.Printf("notify: Bark 通知初始化失败（签到推送不可用）: %v", barkErr)
+	} else {
+		wnflbSvc.SetNotifier(bark)
+		smzdmSvc.SetNotifier(bark)
+	}
+
 	api := webapi.New(webapi.Options{
 		Config: cfg, ConfigPath: *cfgPath,
 		Runtimes: map[provider.Kind]*webapi.Runtime{
@@ -164,6 +174,7 @@ func main() {
 		WnflbTimes: wnflbTimes,
 		Smzdm:      smzdmSvc,
 		SmzdmTimes: smzdmTimes,
+		Notify:     bark,
 	})
 	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("workbuddy", r) })
 	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("traework", r) })

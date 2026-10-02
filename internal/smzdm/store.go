@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/rockswang/workbuddy-wild/internal/notify"
 )
 
 // credential 存档凭证：Cookie 明文（0600 权限；与项目现有 auth 文件策略一致）。
@@ -32,6 +34,23 @@ type Service struct {
 
 	mu     sync.Mutex
 	client *Client
+
+	notifier *notify.Bark // 签到结果推送（可为 nil 表示不推送）
+}
+
+// SetNotifier 设置签到结果推送器（Bark）。
+func (s *Service) SetNotifier(b *notify.Bark) { s.notifier = b }
+
+// notifyResult 发送签到结果通知（结果文案已包含本次金币/积分明细）。
+func (s *Service) notifyResult(ok bool, msg string) {
+	if s.notifier == nil {
+		return
+	}
+	title := "什么值得买签到成功 ✅"
+	if !ok {
+		title = "什么值得买签到失败 ❌"
+	}
+	s.notifier.Send("smzdm", title, msg)
 }
 
 // New 创建服务。dir 为数据目录（如 <stateDir>/smzdm）。
@@ -176,12 +195,14 @@ func (s *Service) AutoCheckin() string {
 	if err != nil {
 		msg := "未配置 Cookie，请先在网页填入"
 		s.saveStatus(false, msg, 0)
+		s.notifyResult(false, msg)
 		return msg
 	}
 	res, err := PerformDailyCheckin(c)
 	if err != nil {
 		msg := "签到失败：" + err.Error()
 		s.saveStatus(false, msg, 0)
+		s.notifyResult(false, msg)
 		return msg
 	}
 	parts := res.Summary()
@@ -195,5 +216,6 @@ func (s *Service) AutoCheckin() string {
 		summary += "；连续签到额外奖励已领取"
 	}
 	s.saveStatus(true, summary, res.GoldEarned)
+	s.notifyResult(true, summary)
 	return summary
 }

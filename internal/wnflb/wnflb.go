@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rockswang/workbuddy-wild/internal/notify"
 )
 
 // ErrCaptchaRequired 表示登录触发了验证码挑战，需走验证码流程。
@@ -29,6 +31,27 @@ type Service struct {
 	mu         sync.Mutex
 	client     *Client
 	challenges map[string]*Challenge // 进行中的验证码会话
+
+	notifier *notify.Bark // 签到结果推送（可为 nil 表示不推送）
+}
+
+// SetNotifier 设置签到结果推送器（Bark）。
+func (s *Service) SetNotifier(b *notify.Bark) { s.notifier = b }
+
+// notifyResult 发送签到结果通知：结果文案 + 当前积分。
+func (s *Service) notifyResult(ok bool, msg string) {
+	if s.notifier == nil {
+		return
+	}
+	title := "福利吧签到成功 ✅"
+	if !ok {
+		title = "福利吧签到失败 ❌"
+	}
+	body := msg
+	if _, credits := s.HomeStatus(); credits != "" {
+		body += "\n当前积分：" + credits
+	}
+	s.notifier.Send("wnflb", title, body)
 }
 
 // Challenge 一次验证码挑战的服务端状态（内存，5 分钟有效）。

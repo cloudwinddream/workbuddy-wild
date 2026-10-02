@@ -54,6 +54,9 @@ services:
       SMZDM_RUN_ON_STARTUP: "${SMZDM_RUN_ON_STARTUP:-true}"
       # 接口基址（一般不用改）
       SMZDM_BASE_URL: "${SMZDM_BASE_URL:-https://user-api.smzdm.com}"
+      # ---- 签到结果 Bark 推送（签到中心页面也可配置，此处仅首次引导）----
+      BARK_SERVER: "${BARK_SERVER:-https://api.day.app}"
+      BARK_KEY: "${BARK_KEY:-}"
     volumes:
       - ./data:/data
     healthcheck:

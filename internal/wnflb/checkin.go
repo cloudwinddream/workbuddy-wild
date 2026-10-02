@@ -93,19 +93,30 @@ func (s *Service) EnsureLoggedIn() error {
 	return fmt.Errorf("自动登录失败（未进入登录态）")
 }
 
-// AutoCheckin 定时任务入口：确保登录后签到，并更新状态文件。
-// 返回人类可读的结果文案（成功/失败都记录）。
-func (s *Service) AutoCheckin() string {
+// runCheckin 统一签到流程：确保登录 → 签到 → 保存状态 → 推送通知。
+func (s *Service) runCheckin() (bool, string) {
 	if err := s.EnsureLoggedIn(); err != nil {
-		msg := "自动签到跳过: " + err.Error()
+		msg := "签到跳过: " + err.Error()
 		log.Printf("wnflb: %s", msg)
 		s.saveStatus(false, msg)
-		return msg
+		s.notifyResult(false, msg)
+		return false, msg
 	}
 	ok, msg := s.Checkin()
 	s.saveStatus(ok, msg)
+	s.notifyResult(ok, msg)
+	return ok, msg
+}
+
+// AutoCheckin 定时任务入口：确保登录后签到，并更新状态文件与通知。
+// 返回人类可读的结果文案（成功/失败都记录）。
+func (s *Service) AutoCheckin() string {
+	_, msg := s.runCheckin()
 	return msg
 }
+
+// ManualCheckin 管理页手动触发，与定时任务同一流程（含通知）。
+func (s *Service) ManualCheckin() (bool, string) { return s.runCheckin() }
 
 // QuickStatus 轻量状态（不请求论坛）：用于调度器日志与状态文件回显。
 func (s *Service) QuickStatus() (username string, hasAccount bool) {

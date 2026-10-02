@@ -44,6 +44,20 @@
 <div class="wrap">
   <h1>签到中心</h1>
   <div class="sub"><a href="/">← 返回主管理页</a> · 所有自动签到项统一在这里管理</div>
+  <div class="card" id="notifyCard">
+    <h2>通知设置（Bark 推送）</h2>
+    <div class="desc">签到成功/失败后推送通知；每个签到账号可单独指定设备，留空则用默认设备</div>
+    <div style="font-size:13px;color:#888">Bark 服务器</div>
+    <input type="text" id="barkServer" placeholder="https://api.day.app">
+    <div style="font-size:13px;color:#888">默认设备 Key（<span id="barkDefaultState">未设置</span>，输入新值可替换）</div>
+    <input type="password" id="barkDefaultKey" placeholder="留空 = 不修改" autocomplete="off">
+    <div>
+      <button id="btnSaveNotify">保存设置</button>
+      <button id="btnTestNotify" class="ghost">发送测试（默认设备）</button>
+      <button id="btnClearDefault" class="ghost">清除默认</button>
+    </div>
+    <div class="msg" id="notifyMsg"></div>
+  </div>
   <div id="modules"></div>
   <div id="globalMsg" class="msg"></div>
 </div>
@@ -141,6 +155,13 @@
           'placeholder="sess=...; smzdm_id=...; device_id=...; ..."></textarea>' +
           '<div><button data-act="smzdm-save">保存 Cookie</button></div></div>';
       }
+      // Bark 设备覆盖（每个账号可单独指定设备，留空用默认）
+      h += '<div class="loginForm"><div style="font-size:13px;color:#888">Bark 设备 Key（可选，留空用默认设备；当前：' +
+        '<span data-bark-state="' + esc(m.id) + '">加载中</span>）</div>' +
+        '<input type="password" data-bark-key="' + esc(m.id) + '" placeholder="留空 = 不修改" autocomplete="off">' +
+        '<div><button data-act="bark-save" class="ghost">保存 Bark 设置</button>' +
+        '<button data-act="bark-test" class="ghost">测试此设备</button>' +
+        '<button data-act="bark-clear" class="ghost">清除</button></div></div>';
       h += '<div class="msg" data-msg="' + esc(m.id) + '"></div>';
       h += '</div>';
       return h;
@@ -162,6 +183,10 @@
   }
 
   async function onAction(act, btn) {
+    if (act === "bark-save" || act === "bark-clear" || act === "bark-test") {
+      barkAction(act, btn);
+      return;
+    }
     var card = btn.closest(".card");
     var mid = card.getAttribute("data-mid");
     if (act === "run") {
@@ -242,10 +267,89 @@
   }
 
   async function refresh() {
+    // 用户正在输入时跳过重渲染，避免输入框被清空
+    var ae = document.activeElement;
+    var typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") &&
+      document.querySelector(".wrap").contains(ae);
+    if (typing) return;
     try {
       var r = await api("GET", "/api/checkins");
       render(r.modules || []);
     } catch (e) { if (e.message !== "401") say("加载失败：" + e.message, false); }
+    loadNotify();
+  }
+
+  // ---- Bark 通知设置 ----
+  function notifySay(t, ok) {
+    var m = $("notifyMsg");
+    if (!m) return;
+    m.textContent = t;
+    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+  }
+
+  async function loadNotify() {
+    try {
+      var r = await api("GET", "/api/notify/config");
+      $("barkServer").value = r.server || "";
+      $("barkServer").placeholder = r.server || "https://api.day.app";
+      $("barkDefaultState").textContent = r.default_set ? ("已设置 " + (r.default_key || "")) : "未设置";
+      (r.modules || []).forEach(function (mm) {
+        var st = document.querySelector('[data-bark-state="' + mm.id + '"]');
+        if (st) st.textContent = mm.set ? ("已设置 " + (mm.key || "")) : "未设置（用默认）";
+      });
+    } catch (e) { /* 通知未启用时静默 */ }
+  }
+
+  async function saveNotify(body) {
+    try {
+      var r = await api("PUT", "/api/notify/config", body);
+      notifySay(r.msg || "已保存", r.ok);
+      if (r.ok) { $("barkDefaultKey").value = ""; loadNotify(); }
+    } catch (e) { if (e.message !== "401") notifySay("保存失败：" + e.message, false); }
+  }
+
+  $("btnSaveNotify").onclick = function () {
+    var body = { server: $("barkServer").value.trim(), modules: {} };
+    var dk = $("barkDefaultKey").value.trim();
+    if (dk) body.default_key = dk;
+    saveNotify(body);
+  };
+  $("btnClearDefault").onclick = function () { saveNotify({ default_key: "CLEAR", modules: {} }); };
+  $("btnTestNotify").onclick = async function () {
+    notifySay("发送中…");
+    try {
+      var r = await api("POST", "/api/notify/test", { module: "" });
+      notifySay(r.msg || "已发送", r.ok);
+    } catch (e) { if (e.message !== "401") notifySay("发送失败：" + e.message, false); }
+  };
+
+  async function barkAction(act, btn) {
+    var card = btn.closest(".card");
+    var mid = card.getAttribute("data-mid");
+    var input = card.querySelector('[data-bark-key="' + mid + '"]');
+    if (act === "bark-save") {
+      var v = input ? input.value.trim() : "";
+      if (!v) { modMsg(mid, "请先输入新的 Bark Key（留空不会修改）", false); return; }
+      var mods = {}; mods[mid] = v;
+      try {
+        var r = await api("PUT", "/api/notify/config", { modules: mods });
+        modMsg(mid, r.msg || "已保存", r.ok);
+        if (r.ok) { input.value = ""; loadNotify(); }
+      } catch (e) { if (e.message !== "401") modMsg(mid, "保存失败：" + e.message, false); }
+    } else if (act === "bark-clear") {
+      var mods2 = {}; mods2[mid] = "CLEAR";
+      try {
+        var r2 = await api("PUT", "/api/notify/config", { modules: mods2 });
+        modMsg(mid, r2.msg || "已清除", r2.ok);
+        if (r2.ok) loadNotify();
+      } catch (e) { if (e.message !== "401") modMsg(mid, "清除失败：" + e.message, false); }
+    } else if (act === "bark-test") {
+      modMsg(mid, "发送中…");
+      try {
+        var r3 = await api("POST", "/api/notify/test", { module: mid });
+        modMsg(mid, r3.msg || "已发送", r3.ok);
+      } catch (e) { if (e.message !== "401") modMsg(mid, "发送失败：" + e.message, false); }
+    }
   }
 
   $("btnKey").onclick = function () {

@@ -53,12 +53,7 @@ func (m *wnflbModule) Summary() checkin.Summary {
 }
 
 func (m *wnflbModule) RunNow() (bool, string) {
-	if err := m.svc.EnsureLoggedIn(); err != nil {
-		return false, err.Error()
-	}
-	ok, msg := m.svc.Checkin()
-	m.svc.SaveStatusForAPI(ok, msg)
-	return ok, msg
+	return m.svc.ManualCheckin()
 }
 
 // registerCheckins 注册签到中心路由。
