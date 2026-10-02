@@ -242,7 +242,25 @@
       if (navigator.clipboard && navigator.clipboard.writeText) {
         return navigator.clipboard.writeText(t);
       }
-      return Promise.reject(new Error("clipboard unavailable"));
+      // 非安全上下文（http://IP 直接访问）下浏览器不提供 Clipboard API，
+      // 降级用 textarea + execCommand（点击手势内调用，依然有效）。
+      return new Promise(function (resolve, reject) {
+        var ta = null;
+        try {
+          ta = document.createElement("textarea");
+          ta.value = t;
+          ta.setAttribute("readonly", "");
+          ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if (ok) { resolve(); } else { reject(new Error("copy command failed")); }
+        } catch (e) {
+          if (ta && ta.parentNode) { ta.parentNode.removeChild(ta); }
+          reject(e);
+        }
+      });
     },
     BrowserOpenURL: function (u) { window.open(u, "_blank"); },
     WindowGetPosition: function () { return Promise.resolve(null); }
