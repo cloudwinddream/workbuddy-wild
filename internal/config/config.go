@@ -237,7 +237,10 @@ func applyEnv(c *Config) {
 			c.Listen = l
 		}
 	}
-	if v := os.Getenv("WB2A_API_KEY"); v != "" {
+	// WB2A_API_KEY 特殊：用 LookupEnv 区分"未设置"与"设为空"。
+	// 显式设为空字符串 = 不鉴权（与 config.json 里 api_key 为空语义一致）；
+	// 未设置 = 保留默认密钥。注意：os.Getenv 无法区分两者，故此处不用。
+	if v, ok := os.LookupEnv("WB2A_API_KEY"); ok {
 		c.APIKey = v
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
