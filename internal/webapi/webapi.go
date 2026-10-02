@@ -24,6 +24,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
+	"github.com/rockswang/workbuddy-wild/internal/wnflb"
 )
 
 // Runtime 是一个平台的运行时资源（与 app.Runtime 同构，避免引用 internal/app）。
@@ -43,6 +44,10 @@ type Options struct {
 	Version    string
 	StateDir   string // state 文件所在目录：登录态文件、日志都放这里
 	PublicBase string // TraeWork OAuth 回调的公开基址，如 http://公网IP:7863
+
+	// Wnflb 福利吧签到服务（nil 表示未启用）；WnflbTimes 为签到时刻表展示。
+	Wnflb      *wnflb.Service
+	WnflbTimes string
 
 	// SetListen 由宿主提供：热切换 HTTP 监听（语义同 app.SetListen，
 	// 失败保持原监听）。
@@ -69,6 +74,9 @@ type API struct {
 
 	loginMu sync.Mutex
 	active  *loginSession // 同一时间只允许一个登录流程（与桌面端 loginBusy 语义一致）
+
+	wnflb      *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
+	wnflbTimes string         // 签到时刻表展示，如 "01:00,22:00"
 }
 
 // apiEvent 推送给前端垫片的事件（垫片轮询 /api/events 拉取）。
@@ -85,15 +93,17 @@ const maxEvents = 200
 // New 构建 API，并清理上次残留的登录态文件。
 func New(opts Options) *API {
 	a := &API{
-		cfg:       opts.Config,
-		cfgPath:   opts.ConfigPath,
-		runtimes:  opts.Runtimes,
-		handler:   opts.Handler,
-		version:   opts.Version,
-		stateDir:  opts.StateDir,
-		pubBase:   opts.PublicBase,
-		setListen: opts.SetListen,
-		apiKey:    opts.Config.APIKey,
+		cfg:        opts.Config,
+		cfgPath:    opts.ConfigPath,
+		runtimes:   opts.Runtimes,
+		handler:    opts.Handler,
+		version:    opts.Version,
+		stateDir:   opts.StateDir,
+		pubBase:    opts.PublicBase,
+		setListen:  opts.SetListen,
+		apiKey:     opts.Config.APIKey,
+		wnflb:      opts.Wnflb,
+		wnflbTimes: opts.WnflbTimes,
 	}
 	// 清理上次异常退出残留的登录态文件。
 	if fps, _ := filepath.Glob(filepath.Join(opts.StateDir, "weblogin-*.json")); len(fps) > 0 {
@@ -127,6 +137,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/config", a.withAuth(a.handleSetConfig))
 	mux.HandleFunc("GET /api/logs", a.withAuth(a.handleLogs))
 	mux.HandleFunc("GET /api/events", a.withAuth(a.handleEvents))
+	a.registerWnflb(mux)
 }
 
 // ---------------------------------------------------------------------------

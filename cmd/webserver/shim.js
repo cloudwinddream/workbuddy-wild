@@ -270,4 +270,16 @@
   window.go.app = window.go.app || {};
   window.go.app.App = App;
   window.runtime = runtime;
+
+  // ---- 福利吧签到入口（Web 版扩展）：右下角悬浮按钮 ----
+  try {
+    var wnflbBtn = document.createElement("a");
+    wnflbBtn.href = "/wnflb/";
+    wnflbBtn.textContent = "福利吧签到";
+    wnflbBtn.title = "福利吧论坛签到管理";
+    wnflbBtn.style.cssText = "position:fixed;right:14px;bottom:14px;z-index:9999;" +
+      "padding:7px 14px;background:#1677ff;color:#fff;border-radius:8px;" +
+      "font-size:13px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.25);";
+    document.body.appendChild(wnflbBtn);
+  } catch (e) {}
 })();

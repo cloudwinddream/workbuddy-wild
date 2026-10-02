@@ -33,6 +33,17 @@ services:
       WB2A_PUBLIC_URL: ""
       # 签到时间按此时区计算
       TZ: "Asia/Shanghai"
+      # ---- 福利吧论坛签到（Go 原生模块，独立管理页 http://<服务器IP>:7863/wnflb/）----
+      # 账号也可在网页上直接登录；这里填了则容器首次启动时自动导入。
+      # 推荐写在 .env 里（见 .env.example），不要直接提交到仓库。
+      FORUM_USERNAME: "${FORUM_USERNAME:-}"
+      FORUM_PASSWORD: "${FORUM_PASSWORD:-}"
+      # 签到时刻表（北京时间，逗号分隔）
+      WNFLB_CHECKIN_TIMES: "${WNFLB_CHECKIN_TIMES:-01:00,22:00}"
+      # 启动后是否先跑一次签到（true/false）
+      WNFLB_RUN_ON_STARTUP: "${WNFLB_RUN_ON_STARTUP:-true}"
+      # 论坛基址（论坛换域名时改这里）
+      WNFLB_BASE_URL: "${WNFLB_BASE_URL:-https://www.wnflb2023.com}"
     volumes:
       - ./data:/data
     healthcheck:
@@ -41,31 +52,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-
-  # ------------------------------------------------------------------
-  # 福利吧论坛自动签到（sidecar）
-  # 上游：https://github.com/fmdxx1991/wnflb-checkin
-  # 独立容器、独立定时（默认每天 01:00 / 22:00 北京时间）、独立账号，
-  # 与 workbuddy-wild-web 的 AI 账号签到互不干扰。
-  # 账号密码填在 .env 里（见 .env.example），不要写进仓库文件。
-  # ------------------------------------------------------------------
-  wnflb-checkin:
-    build:
-      context: ./wnflb
-      args:
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
-    image: wnflb-checkin:latest
-    container_name: wnflb-checkin
-    restart: unless-stopped
-    environment:
-      TZ: "Asia/Shanghai"
-      FORUM_USERNAME: "${FORUM_USERNAME:-}"
-      FORUM_PASSWORD: "${FORUM_PASSWORD:-}"
-      # FORUM_COOKIE: "${FORUM_COOKIE:-}"      # 可选：直接给 Cookie，优先级高于账号密码
-      # PUSHPLUS_TOKEN: "${PUSHPLUS_TOKEN:-}"  # 可选：微信推送
-      # SERVERCHAN_KEY: "${SERVERCHAN_KEY:-}"  # 可选：微信推送
-      CHECKIN_TIMES: "${WNFLB_CHECKIN_TIMES:-01:00,22:00}"
-      RUN_ON_STARTUP: "${WNFLB_RUN_ON_STARTUP:-true}"
-      COOKIE_FILE: "/app/data/cookies.json"
-    volumes:
-      - ./wnflb-data:/app/data

@@ -36,6 +36,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/traework"
 	"github.com/rockswang/workbuddy-wild/internal/upstream"
 	"github.com/rockswang/workbuddy-wild/internal/webapi"
+	"github.com/rockswang/workbuddy-wild/internal/wnflb"
 )
 
 // version 管理页展示的版本号（构建时 -ldflags "-X main.version=..." 注入）。
@@ -43,6 +44,9 @@ var version = "0.6.9"
 
 //go:embed shim.js
 var shimJS string
+
+//go:embed wnflb.html
+var wnflbHTML string
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json (不存在则用默认配置 + WB2A_* 环境变量)")
@@ -118,6 +122,19 @@ func main() {
 		ErrThreshold: cfg.Cooldown.ErrThresh, ErrCooldown: cfg.ErrCooldownDur,
 	})
 
+	// ---- 福利吧签到（独立模块，单账号，Go 原生实现） ----
+	wnflbSvc := wnflb.New(filepath.Join(stateDir, "wnflb"), os.Getenv("WNFLB_BASE_URL"))
+	wnflbTimes := strings.TrimSpace(os.Getenv("WNFLB_CHECKIN_TIMES"))
+	if wnflbTimes == "" {
+		wnflbTimes = "01:00,22:00"
+	}
+	// .env 引导：无存档账号且给了账号密码时自动导入（网页登录仍可覆盖）。
+	if u, p := os.Getenv("FORUM_USERNAME"), os.Getenv("FORUM_PASSWORD"); u != "" && p != "" {
+		if wnflbSvc.ImportAccountFromEnv(u, p) {
+			log.Printf("wnflb: 已从环境变量导入论坛账号")
+		}
+	}
+
 	api := webapi.New(webapi.Options{
 		Config: cfg, ConfigPath: *cfgPath,
 		Runtimes: map[provider.Kind]*webapi.Runtime{
@@ -127,6 +144,8 @@ func main() {
 		Handler: h, Version: version, StateDir: stateDir,
 		PublicBase: publicBase(cfg),
 		SetListen:  setListen,
+		Wnflb:      wnflbSvc,
+		WnflbTimes: wnflbTimes,
 	})
 	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("workbuddy", r) })
 	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("traework", r) })
@@ -149,6 +168,9 @@ func main() {
 	defer stop()
 	go wbSch.Run(sctx)
 	go trSch.Run(sctx)
+	// 福利吧每日签到（独立模块）。
+	wnflbRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("WNFLB_RUN_ON_STARTUP"))) != "false"
+	go wnflb.RunScheduler(sctx, wnflb.ParseTimes(wnflbTimes), wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)
 
 	// ---- HTTP 服务 ----
 	if err := setListen(cfg.Listen.Host, cfg.Listen.Port); err != nil {
@@ -240,6 +262,12 @@ func mountFrontend(mux *http.ServeMux) {
 	// /app.js /style.css：桌面版前端原文件（不修改）。
 	mux.HandleFunc("/app.js", serveFile(filepath.Join(dir, "app.js"), "application/javascript; charset=utf-8"))
 	mux.HandleFunc("/style.css", serveFile(filepath.Join(dir, "style.css"), "text/css; charset=utf-8"))
+
+	// /wnflb/：福利吧签到独立管理页（内嵌）。
+	mux.HandleFunc("/wnflb/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, wnflbHTML)
+	})
 
 	// /：index.html + 注入垫片（在 app.js 之前加载，保证 window.go 先就绪）。
 	indexRaw, err := os.ReadFile(filepath.Join(dir, "index.html"))
