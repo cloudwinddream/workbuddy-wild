@@ -52,35 +52,48 @@ func Classify(status int, body string) provider.ErrKind {
 
 // CheckinRateLimitCode TraeWork 签到业务码 9074。
 //
-// ⚠️ 文案是"当前参与用户太多，请稍后再试"，**但它不是限流**。
-// 2026-09-30 单变量实测确认：9074 = **设备校验失败**。
-// 同一个账号、同一个 token，只改 X-Device-Id：
+// 文案是"当前参与用户太多，请稍后再试"。
 //
-//	随机 32 位 hex + {"req_source":1} → 9074
-//	客户端真实注册号 + {"req_source":1} → 成功
+// ⚠️ 语义经过两次修正，最终结论（2026-10-02）：**它是瞬时限流，可重试**。
 //
-// 因此**不要靠重试来"等高峰过去"**——重试再多次也不会成功，
-// 必须把账号里存的 deviceId 换成客户端真实注册设备号。
-// 保留此常量仅用于识别该错误并给出可操作的提示。
+//	v0.5.4        当作"高峰限流"，做指数退避重试 —— 方向对但实现差（最坏 60s）
+//	v0.5.7 ~ 0.6.8 定性为"设备号未注册、重试无用" —— **错判**
+//	v0.6.9        确认为**瞬时限流**：同一操作稍后重试即可成功
+//
+// 推翻旧结论的证据（2026-10-02）：
+//
+//	09:00 程序用随机设备号轮换重试 → 9074（唯一一次，程序随即放弃）
+//	同日手工用 8 个随机设备号重试   → 全部 code=0，成功 +100
+//
+// 即**同一操作有时成功、有时 9074**，且重试就能过 —— 这是限流的特征，
+// 不是"设备号非法"（后者应稳定复现，重试无用）。
+//
+// 因此换设备号重试时遇到 9074 应当**继续换号再试**，绝不能就此放弃。
 const CheckinRateLimitCode = 9074
 
 // ErrCheckinRateLimited 签到业务码 9074。
 //
-// 历史包袱：v0.5.4 曾把它当"高峰限流"处理，安排指数退避重试。
-// 实测证明方向错误——重试永不成功。现在仍实现 IsRateLimited()（返回 false
-// 会被调度器当账号异常），但**语义已修正为"设备未注册"**，
-// 消息里直接告诉用户怎么修。
+// v0.5.4 曾把它当"高峰限流"做指数退避重试；v0.5.7 误改为"设备未注册、
+// 重试无用"；v0.6.9 依据实测重新定性为**瞬时/偶发限流**。
+//
+// IsRateLimited() 仍返回 false —— 语义是"**不交由调度器安排延迟重试**"。
+// 原因：本错误只在**轮换设备号的过程中**出现，此时已在请求内同步重试
+// （最多 maxRotateAttempts 次），比交给调度器"稍后再试"更及时有效。
+// 调度器的延迟重试队列只用于跨小时的补签场景，不适合这种秒级的偶发拒绝。
 type ErrCheckinRateLimited struct {
 	Attempts int
 	Msg      string
 }
 
 func (e *ErrCheckinRateLimited) Error() string {
-	return fmt.Sprintf("checkin 9074 (device not registered): %s", e.Msg)
+	return fmt.Sprintf("checkin 9074 (transient throttle): %s", e.Msg)
 }
 
-// IsRateLimited 返回 false：9074 不是限流，而是设备未注册（重试无用）。
-// 返回 false 让调度器不再安排"稍后自动重试"——那是个无效承诺。
+// IsRateLimited 返回 false：9074 不在调度器层安排延迟重试。
+//
+// 语义澄清（v0.6.9）：9074 **是**可重试的瞬时限流，但重试动作已在
+// claimWithRotatedDevice 内部同步完成（换号最多 8 次）。此处返回 false
+// 只是为了**不重复安排**调度器那套"稍后自动重试"，并非表示"重试无用"。
 func (e *ErrCheckinRateLimited) IsRateLimited() bool { return false }
 
 // IsCheckinRateLimited 报告错误是否为签到 9074（设备未注册）。
@@ -304,8 +317,23 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	}
 
 	if code == CheckinRateLimitCode {
-		log.Printf("traework checkin claim device-rejected uid=%s code=%d device=%s（设备号未被认可，重试无用）",
-			a.UID, code, shortDevice(a.DeviceID))
+		// 9074 = 瞬时/偶发限流（**不是**"设备号未注册"）。
+		//
+		// ⚠️ v0.5.7~v0.6.8 曾把它定性为"设备号未注册、重试无用"并直接放弃，
+		// 那是错判。2026-10-02 实测推翻：同一操作有时成功、有时 9074，
+		// 且重试就能通过（详见 CheckinRateLimitCode 注释）。
+		//
+		// 因此这里**不再直接放弃**，而是同样走"换设备号重试"路径 ——
+		// claimWithRotatedDevice 内部会对 9074 继续换号重试。
+		log.Printf("traework checkin claim 9074 uid=%s device=%s（瞬时限流，尝试换号重试）",
+			a.UID, shortDevice(a.DeviceID))
+		if ok, altAmount := c.claimWithRotatedDevice(a); ok {
+			log.Printf("traework checkin claim 9074-rotated-success uid=%s（换号重试后入账）", a.UID)
+			_ = altAmount
+			return nil
+		}
+		log.Printf("traework checkin claim throttle-exhausted uid=%s device=%s（多次换号仍被限流）",
+			a.UID, shortDevice(a.DeviceID))
 		return &ErrCheckinRateLimited{Attempts: 1, Msg: msg}
 	}
 	if code != 0 {
@@ -316,7 +344,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		//   若该账号今天确实还没领到额度，就会真正入账（额度 +100）。
 		//   原设备号被拒时换号成功 —— 已验证额度从 4600 变为 4700。
 		//
-		// 因此 9095 不再直接判定失败，而是**自动轮换设备号重试一次**。
+		// 因此 9095 不再直接判定失败，而是**自动轮换设备号重试**。
 		// 这样能救回"设备号被上游标记为今日已签、但账号当天尚未领到"的账号
 		// （实测账号 2222575719809915 正是这种状态，用户反馈"一点也没增长"）。
 		if code == CheckinAlreadyClaimedCode {
@@ -345,14 +373,26 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	return nil
 }
 
-// claimWithRotatedDevice 在原设备号被 9095 拒绝后，用一个**新生成的合法设备号**
-// 再 claim 一次；随后校验额度是否真的增加。
+// claimWithRotatedDevice 在原设备号被 9095 拒绝后，用**多个新生成的合法设备号**
+// 依次重试 claim，直到额度真的增加为止。
 //
-// 为什么这么做：实测确认 9095 是**设备维度**的拒绝，而额度发放是**账号维度**的。
+// 为什么要轮换：实测 9095 是**设备维度**的拒绝，而额度发放是**账号维度**的。
 // 原设备号被上游标记"今日已签"时，会让一个当天其实没领到额度的账号被拒；
 // 换一个全新设备号即可正常入账（实测 4600 → 4700）。
 //
-// ⚠️ 只在 9095（幂等类）后调用。返回 true 表示"换号后确实入账了"。
+// ⚠️ 为什么要**多次**重试（v0.6.9 修正）：
+// 换号请求有一定概率返回 **9074「当前参与用户太多，请稍后再试」**。
+// 该码字面即"暂时性限流"，实测**同一操作稍后重试就会成功**
+// （2026-10-02 实测：程序第 1 次换号撞上 9074 后放弃，导致账号当天没签到；
+//  同一天手工重试随机号，连续多次都返回 code=0 并成功 +100）。
+//
+// 早期版本把 9074 定性为"设备号未注册、重试无用"并只换一次号 —— 双重错误：
+//   ① 9074 是**瞬时限流**，不是设备号非法（重试即可通过）
+//   ② 只试一次，正好撞上 9074 就彻底放弃
+//
+// 现在：最多尝试 maxRotateAttempts 个不同设备号；一旦额度真的增加立刻返回。
+//
+// 返回 true 表示"换号后确实入账了"。
 func (c *Client) claimWithRotatedDevice(a *auth.Auth) (bool, float64) {
 	before, err := c.UserEntUsage(a)
 	if err != nil {
@@ -360,46 +400,75 @@ func (c *Client) claimWithRotatedDevice(a *auth.Auth) (bool, float64) {
 		return false, 0
 	}
 
-	alt := randDeviceID()
 	orig := a.DeviceID
-	a.DeviceID = alt
 	defer func() { a.DeviceID = orig }() // 不污染凭证：本次请求后立刻还原
 
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
-	if err != nil {
-		return false, 0
-	}
-	UgHeaders(req, a)
-	data, err := c.doJSON(req)
-	if err != nil {
-		log.Printf("traework rotate-claim uid=%s 请求失败 err=%v", a.UID, err)
-		return false, 0
-	}
-	code, msg, success, perr := parseCheckinResponse(data)
-	if perr != nil {
-		return false, 0
-	}
-	if code != 0 || (success != nil && !*success) {
-		log.Printf("traework rotate-claim uid=%s alt=%s code=%d msg=%s（未通过）",
-			a.UID, shortDevice(alt), code, msg)
-		return false, 0
+	const maxRotateAttempts = 8
+	var lastCode int
+	var lastMsg string
+
+	for i := 0; i < maxRotateAttempts; i++ {
+		alt := randDeviceID()
+		a.DeviceID = alt
+
+		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte(CheckinClaimBody)))
+		if err != nil {
+			return false, 0
+		}
+		UgHeaders(req, a)
+		data, err := c.doJSON(req)
+		if err != nil {
+			log.Printf("traework rotate-claim uid=%s alt=%s 第 %d 次请求失败 err=%v",
+				a.UID, shortDevice(alt), i+1, err)
+			continue
+		}
+		code, msg, success, perr := parseCheckinResponse(data)
+		if perr != nil {
+			continue
+		}
+		lastCode, lastMsg = code, msg
+
+		// 9074 = 瞬时限流：换个号（或稍后）再试，**不是**失败终止条件。
+		// 这是 v0.6.9 的关键修正：早期实现把它当"设备号未注册"直接放弃。
+		if code == CheckinRateLimitCode {
+			log.Printf("traework rotate-claim uid=%s alt=%s 第 %d 次 code=9074（瞬时限流，继续换号重试）msg=%s",
+				a.UID, shortDevice(alt), i+1, msg)
+			continue
+		}
+		if code == CheckinAlreadyClaimedCode {
+			// 该号也被判"今日已签"，换个号再来。
+			log.Printf("traework rotate-claim uid=%s alt=%s 第 %d 次 code=9095（换号重试）",
+				a.UID, shortDevice(alt), i+1)
+			continue
+		}
+		if code != 0 || (success != nil && !*success) {
+			log.Printf("traework rotate-claim uid=%s alt=%s 第 %d 次 code=%d msg=%s（未通过）",
+				a.UID, shortDevice(alt), i+1, code, msg)
+			continue
+		}
+
+		// code==0：仍需以**额度是否真的增加**为准，而不是以 code==0 为准。
+		// 实测未领过的账号换号后会 +100；已领过的账号换号虽返 0 但额度不变。
+		after, err := c.UserEntUsage(a)
+		if err != nil {
+			log.Printf("traework rotate-claim uid=%s 取后置额度失败（保守判为未入账）err=%v", a.UID, err)
+			return false, 0
+		}
+		if after <= before {
+			// 额度没变：说明该账号今天确实已经领过（换号返 0 但不入账）。
+			// 这是"今日已签"的确定结论，不必再试。
+			log.Printf("traework rotate-claim uid=%s alt=%s code=0 但额度未变（%d -> %d），判为今日已领",
+				a.UID, shortDevice(alt), before, after)
+			return false, 0
+		}
+		log.Printf("traework rotate-claim uid=%s alt=%s 第 %d 次入账成功：%d -> %d（+%d）",
+			a.UID, shortDevice(alt), i+1, before, after, after-before)
+		return true, float64(after - before)
 	}
 
-	// 关键：以**额度是否真的增加**为准，而不是以 code==0 为准。
-	// 实测未领过的账号换号后会 +100；已领过的账号换号虽返 0 但额度不变。
-	after, err := c.UserEntUsage(a)
-	if err != nil {
-		log.Printf("traework rotate-claim uid=%s 取后置额度失败（保守判为未入账）err=%v", a.UID, err)
-		return false, 0
-	}
-	if after <= before {
-		log.Printf("traework rotate-claim uid=%s alt=%s code=0 但额度未变（%d -> %d），判为未入账",
-			a.UID, shortDevice(alt), before, after)
-		return false, 0
-	}
-	log.Printf("traework rotate-claim uid=%s alt=%s 入账成功：%d -> %d（+%d）",
-		a.UID, shortDevice(alt), before, after, after-before)
-	return true, float64(after - before)
+	log.Printf("traework rotate-claim uid=%s 尝试 %d 个设备号均未成功（最后 code=%d msg=%s）",
+		a.UID, maxRotateAttempts, lastCode, lastMsg)
+	return false, 0
 }
 
 // randDeviceID 生成一个格式合法的 16 位数字设备号。

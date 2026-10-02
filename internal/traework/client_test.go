@@ -89,8 +89,9 @@ func TestDailyCheckinAcceptsDidCheckedIn(t *testing.T) {
 // 为什么不再跳过：实测（2026-10-01）存在 did_checked_in=true 但当天
 // 其实没拿到额度的状态（checked_in=false）。若前置直接 return，
 // 就永远救不回这类账号。现在改为"照发 claim"：
-//   已领 -> 9095（幂等，无副作用）
-//   被误标但未领 -> 0 且真正入账
+//
+//	已领 -> 9095（幂等，无副作用）
+//	被误标但未领 -> 0 且真正入账
 func TestDailyCheckinStillClaimsWhenMarkedCheckedIn(t *testing.T) {
 	var claimCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,5 +277,117 @@ func TestCurrentDayGrantHandlesMissingIDs(t *testing.T) {
 	}
 	if granted || amt != 0 {
 		t.Fatalf("无 ID 时保守判未到账，得 granted=%t amt=%v", granted, amt)
+	}
+}
+
+// ★ 回归（2026-10-02）：收到 9074 后必须**继续换号重试**，不能直接放弃。
+//
+// 真实事故：09:00 定时签到，账号 2222575719809915 轮换设备号时第 1 次撞上 9074，
+// 旧实现把 9074 当"设备号未注册、重试无用"直接放弃 → 该账号当天没签到成功。
+// 而同一天手工用 8 个随机设备号重试，全部返回 code=0 并成功 +100。
+//
+// 即 9074 是**瞬时/偶发限流**，重试即可通过。本测试锁定这一行为。
+func TestRotateClaimRetriesOn9074(t *testing.T) {
+	var claimCalls atomic.Int32
+	base := int64(1000)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCheckinClaim:
+			n := claimCalls.Add(1)
+			if n <= 2 {
+				// 前两次返 9074（模拟偶发限流）
+				_, _ = w.Write([]byte(`{"code":9074,"message":"当前参与用户太多，请稍后再试"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+		case EpCurrentEntList:
+			// 额度随 claim 成功次数增长：第 3 次 claim 后才 +100
+			amt := base
+			if claimCalls.Load() >= 3 {
+				amt = base + 100
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"usage_summary":{"total_amount":%d,"consumed_amount":0}}`, amt)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+
+	ok, amount := c.claimWithRotatedDevice(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"})
+	if !ok {
+		t.Fatalf("前两次 9074 后第 3 次成功，应判为入账成功（claim 调用 %d 次）", claimCalls.Load())
+	}
+	if amount != 100 {
+		t.Fatalf("amount=%v, want 100", amount)
+	}
+	if claimCalls.Load() < 3 {
+		t.Fatalf("必须对 9074 继续重试（实际只调用 %d 次）", claimCalls.Load())
+	}
+}
+
+// 全部尝试都返 9074 时才允许失败（不能无限重试）。
+func TestRotateClaimGivesUpAfterMaxAttempts(t *testing.T) {
+	var claimCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCheckinClaim:
+			claimCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":9074,"message":"当前参与用户太多，请稍后再试"}`))
+		case EpCurrentEntList:
+			_, _ = w.Write([]byte(`{"usage_summary":{"total_amount":1000,"consumed_amount":0}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+
+	ok, _ := c.claimWithRotatedDevice(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"})
+	if ok {
+		t.Fatal("全部 9074 时应判为未成功")
+	}
+	if claimCalls.Load() > 12 {
+		t.Fatalf("重试次数应有上限，实际 %d 次", claimCalls.Load())
+	}
+	if claimCalls.Load() < 2 {
+		t.Fatalf("不应只试 1 次就放弃（实际 %d 次）", claimCalls.Load())
+	}
+}
+
+// 额度未增加时（该账号今天确实已领）应立即返回，不再徒劳重试。
+func TestRotateClaimStopsWhenNoCreditIncrease(t *testing.T) {
+	var claimCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCheckinClaim:
+			claimCalls.Add(1)
+			_, _ = w.Write([]byte(`{"code":0,"message":"success"}`))
+		case EpCurrentEntList:
+			// 额度恒定：说明今天已领过
+			_, _ = w.Write([]byte(`{"usage_summary":{"total_amount":4600,"consumed_amount":0}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.UgHost = srv.URL
+
+	ok, _ := c.claimWithRotatedDevice(&auth.Auth{AccessToken: "at", DeviceID: "4484256452647802"})
+	if ok {
+		t.Fatal("额度未变应判为未入账（今日已领）")
+	}
+	if claimCalls.Load() != 1 {
+		t.Fatalf("额度未变应立即停止，实际 claim %d 次", claimCalls.Load())
 	}
 }
