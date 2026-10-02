@@ -1,0 +1,43 @@
+# WorkBuddy-Wild Web 版 Docker Compose 部署
+#
+# 用法：
+#   1. 把 WB2A_API_KEY 换成强随机值（管理页 + /v1 接口的 Bearer 密钥）
+#   2. docker compose up -d --build
+#   3. 浏览器打开 http://<服务器IP>:7863/ ，首次会提示输入 API Key
+#   4. 在页面右上“＋ WorkBuddy / ＋ TraeWork”添加账号
+#
+# 数据持久化：./data 挂载到 /data（含 auths/ 账号、state-*.json 状态、
+# app.log 日志）。升级时重建容器即可，数据不受影响。
+
+services:
+  workbuddy-wild-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workbuddy-wild-web:latest
+    container_name: workbuddy-wild-web
+    restart: unless-stopped
+    ports:
+      - "7863:7863"
+    environment:
+      # 监听全部网卡（容器内必须是 :7863，不能写 127.0.0.1:7863）
+      WB2A_LISTEN: ":7863"
+      # ⚠️ 务必改成强随机值！这是管理页与 /v1 接口的 Bearer 鉴权密钥。
+      # 留空 = 不鉴权（仅建议可信内网调试时这么做）。
+      WB2A_API_KEY: "CHANGE_ME_强随机密钥"
+      WB2A_AUTH_DIR: "/data/auths"
+      WB2A_STATE_FILE: "/data/state.json"
+      # TraeWork 登录回调用：浏览器与服务端不在同一台机器时，
+      # 填浏览�器可访问的地址，如 http://192.168.1.10:7863
+      # （SSH 端口转发场景可留空，默认用 http://127.0.0.1:7863）
+      WB2A_PUBLIC_URL: ""
+      # 签到时间按此时区计算
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:7863/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

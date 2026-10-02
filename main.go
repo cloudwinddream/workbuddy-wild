@@ -1,3 +1,5 @@
+//go:build windows
+
 // main.go WorkBuddy-Wild 托盘 GUI 入口。
 // 单进程集成：OpenAI 兼容 HTTP 服务 + 自动签到调度器 + 系统托盘管理面板。
 // 依赖：Windows 10 21H2+（WebView2 运行时）或无 WebView2 时自动安装；无 Go/Python/Docker/Bash。

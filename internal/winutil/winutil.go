@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package winutil Windows 平台小工具：工作区、任务栏隐藏、无痕浏览器拉起、开机自启。
 // 仅支持 Windows amd64（本项目分发目标）。
 package winutil

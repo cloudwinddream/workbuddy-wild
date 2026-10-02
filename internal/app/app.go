@@ -1,3 +1,5 @@
+//go:build windows
+
 // Package app wails 绑定层：向托盘面板前端暴露账号/签到/积分/配置操作，
 // 内部驱动 pool / scheduler / upstream / HTTP 服务。
 package app

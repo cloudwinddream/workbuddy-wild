@@ -1,0 +1,8 @@
+# Docker 构建上下文排除项
+.git
+data/
+config.json
+*.log
+build/
+dist/
+node_modules/
