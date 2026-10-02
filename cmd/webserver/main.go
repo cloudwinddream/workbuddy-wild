@@ -45,8 +45,8 @@ var version = "0.6.9"
 //go:embed shim.js
 var shimJS string
 
-//go:embed wnflb.html
-var wnflbHTML string
+//go:embed checkin.html
+var checkinHTML string
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json (不存在则用默认配置 + WB2A_* 环境变量)")
@@ -263,10 +263,14 @@ func mountFrontend(mux *http.ServeMux) {
 	mux.HandleFunc("/app.js", serveFile(filepath.Join(dir, "app.js"), "application/javascript; charset=utf-8"))
 	mux.HandleFunc("/style.css", serveFile(filepath.Join(dir, "style.css"), "text/css; charset=utf-8"))
 
-	// /wnflb/：福利吧签到独立管理页（内嵌）。
-	mux.HandleFunc("/wnflb/", func(w http.ResponseWriter, r *http.Request) {
+	// /checkin/：签到中心（所有签到模块统一管理，内嵌）。
+	mux.HandleFunc("/checkin/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, wnflbHTML)
+		_, _ = io.WriteString(w, checkinHTML)
+	})
+	// /wnflb/：旧地址，跳转到签到中心。
+	mux.HandleFunc("/wnflb/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/checkin/", http.StatusFound)
 	})
 
 	// /：index.html + 注入垫片（在 app.js 之前加载，保证 window.go 先就绪）。

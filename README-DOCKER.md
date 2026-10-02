@@ -151,18 +151,20 @@ docker compose up -d --build
 5. 管理页是"桌面版前端 + 兼容垫片"，首次加载需请求 `/shim.js`；
    离线内网使用无影响（全部资源同源，无外部 CDN）。
 
-## 八、福利吧论坛签到
+## 八、签到中心
 
-主服务内置**福利吧论坛**（`wnflb2023.com`，Discuz! X3.4 + `fx_checkin` 插件）
-的签到模块：Go 原生实现，与 AI 账号签到完全独立（独立账号、独立定时）。
-协议逆向来自上游开源项目 https://github.com/fmdxx1991/wnflb-checkin。
+主服务内置**签到中心**：所有第三方自动签到统一在一个页面管理——
+`http://<服务器IP>:7863/checkin/`（主管理页右下角也有"签到中心"悬浮入口）。
+每个签到项显示：每天自动签到是否成功、上次签到时间、下次签到时间、
+**对应积分**，并支持手动"立即签到"。新的签到项以后直接加进来，
+不用再开新页面。
 
-独立管理页：`http://<服务器IP>:7863/wnflb/`（主管理页右下角也有悬浮入口）。
-页面上可以看到：**登录状态、当前积分、上次签到结果、下次签到时间**，
-并支持网页直接登录、手动立即签到、退出登录。
+当前已接入：**福利吧论坛**（`wnflb2023.com`，Discuz! X3.4 + `fx_checkin` 插件）。
+协议逆向来自上游开源项目 https://github.com/fmdxx1991/wnflb-checkin，
+已完整移植为 Go 原生实现（`internal/wnflb`）。
 
 ```bash
-# 账号密码填在 .env 里（容器首次启动自动导入；也可在网页上直接登录）
+# 账号密码填在 .env 里（容器首次启动自动导入；也可在签到中心页面直接登录）
 cp .env.example .env
 vim .env   # 填 FORUM_USERNAME / FORUM_PASSWORD
 docker compose up -d --build
@@ -173,7 +175,6 @@ docker compose up -d --build
 - 默认每天 **01:00 / 22:00**（北京时间）自动签到，`WNFLB_CHECKIN_TIMES` 可改；
   启动后默认先跑一次（`WNFLB_RUN_ON_STARTUP=false` 可关）。
 - 登录态（Cookie）持久化在 `./data/wnflb/`，过期自动用存档账号重登。
-- 新 IP 首次登录若触发论坛验证码，网页会弹出验证码图片，手动输入即可
-  （不需要 OCR）。
+- 新 IP 首次登录若触发论坛验证码，页面会弹出验证码图片，手动输入即可。
 - 账号密码明文存于 `./data/wnflb/account.json`（0600 权限），与本项目
   auth 文件策略一致；`.env` 不会被 git 提交。

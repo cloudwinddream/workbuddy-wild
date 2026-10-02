@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/checkin"
 	"github.com/rockswang/workbuddy-wild/internal/config"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
@@ -77,6 +78,8 @@ type API struct {
 
 	wnflb      *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
 	wnflbTimes string         // 签到时刻表展示，如 "01:00,22:00"
+
+	checkins *checkin.Registry // 签到中心模块注册表
 }
 
 // apiEvent 推送给前端垫片的事件（垫片轮询 /api/events 拉取）。
@@ -113,6 +116,11 @@ func New(opts Options) *API {
 		log.Printf("webapi: 清理残留登录态文件 %d 个", len(fps))
 	}
 	go a.loginReaper()
+	// 签到中心：注册所有签到模块（福利吧为第一个）。
+	a.checkins = checkin.New()
+	if opts.Wnflb != nil {
+		a.checkins.Register(&wnflbModule{svc: opts.Wnflb, times: opts.WnflbTimes})
+	}
 	return a
 }
 
@@ -138,6 +146,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/logs", a.withAuth(a.handleLogs))
 	mux.HandleFunc("GET /api/events", a.withAuth(a.handleEvents))
 	a.registerWnflb(mux)
+	a.registerCheckins(mux)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>签到中心</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 20px; background: #f5f6f8; color: #222; }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .sub a { color: #1677ff; text-decoration: none; }
+  .card { background: #fff; border-radius: 10px; padding: 16px 18px;
+          margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .card h2 { font-size: 16px; margin: 0 0 2px; }
+  .card .desc { font-size: 12px; color: #999; margin-bottom: 8px; }
+  .row { display: flex; justify-content: space-between; padding: 7px 0;
+         border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+  .row:last-child { border-bottom: none; }
+  .k { color: #888; }
+  .v { font-weight: 500; text-align: right; max-width: 65%; }
+  .ok { color: #189225; } .bad { color: #d4380d; } .muted { color: #aaa; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 9px 10px; margin: 6px 0; font-size: 14px;
+    border: 1px solid #d9d9d9; border-radius: 6px; }
+  button { padding: 9px 18px; font-size: 14px; border: none; border-radius: 6px;
+           background: #1677ff; color: #fff; cursor: pointer; margin: 6px 8px 6px 0; }
+  button:disabled { background: #bcd6ff; cursor: default; }
+  button.ghost { background: #f0f0f0; color: #333; }
+  .captchaBox { display: none; }
+  .captchaImg { display: block; margin: 8px 0; border: 1px solid #eee;
+                border-radius: 6px; cursor: pointer; }
+  .msg { min-height: 20px; font-size: 13px; margin-top: 6px; }
+  .loginForm { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee; }
+  #keyOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45);
+                align-items: center; justify-content: center; z-index: 50; }
+  #keyOverlay .card { width: 320px; }
+  .empty { text-align: center; color: #aaa; padding: 30px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>签到中心</h1>
+  <div class="sub"><a href="/">← 返回主管理页</a> · 所有自动签到项统一在这里管理</div>
+  <div id="modules"></div>
+  <div id="globalMsg" class="msg"></div>
+</div>
+
+<div id="keyOverlay">
+  <div class="card">
+    <div style="font-weight:600;margin-bottom:8px">输入管理页 API Key</div>
+    <input type="password" id="apiKeyInput" placeholder="WB2A_API_KEY 的值">
+    <div><button id="btnKey">确定</button></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var LS_KEY = "wbw_api_key"; // 与主管理页共用
+  var captchaId = "", captchaUser = "", captchaPass = "";
+
+  function $(id) { return document.getElementById(id); }
+  function key() { try { return sessionStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; } }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  async function api(method, path, body) {
+    var headers = {};
+    var k = key();
+    if (k) headers["Authorization"] = "Bearer " + k;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    var r = await fetch(path, {
+      method: method, headers: headers,
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (r.status === 401) { $("keyOverlay").style.display = "flex"; throw new Error("401"); }
+    return r.json();
+  }
+
+  function say(t, ok) {
+    var m = $("globalMsg");
+    m.textContent = t;
+    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+  }
+
+  function statusBadge(m) {
+    if (!m.configured) return '<span class="muted">未配置</span>';
+    if (!m.logged_in) return '<span class="bad">登录已过期</span>';
+    return '<span class="ok">正常' + (m.username ? '（' + esc(m.username) + '）' : '') + '</span>';
+  }
+
+  function render(mods) {
+    var box = $("modules");
+    if (!mods || !mods.length) {
+      box.innerHTML = '<div class="card empty">暂无签到模块</div>';
+      return;
+    }
+    box.innerHTML = mods.map(function (m) {
+      var h = '<div class="card" data-mid="' + esc(m.id) + '">';
+      h += '<h2>' + esc(m.name) + '</h2><div class="desc">' + esc(m.desc || "") + '</div>';
+      h += '<div class="row"><span class="k">状态</span><span class="v">' + statusBadge(m) + '</span></div>';
+      h += '<div class="row"><span class="k">' + esc(m.points_name || "积分") + '</span>' +
+           '<span class="v">' + (m.points ? esc(m.points) : "—") + '</span></div>';
+      h += '<div class="row"><span class="k">上次签到</span><span class="v">' +
+           (m.last_at ? esc(m.last_at) + ' · ' + (m.last_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
+            (m.last_msg ? ' ' + esc(m.last_msg) : '') : "—") + '</span></div>';
+      h += '<div class="row"><span class="k">下次签到</span><span class="v">' +
+           esc(m.next_at || "—") + (m.times ? '（' + esc(m.times) + '）' : '') + '</span></div>';
+      h += '<div style="margin-top:8px"><button data-act="run" data-mid="' + esc(m.id) + '">立即签到</button>';
+      if (m.id === "wnflb" && m.logged_in) {
+        h += '<button data-act="logout" class="ghost">退出登录</button>';
+      }
+      h += '</div>';
+      // 福利吧登录表单（未登录时展开）
+      if (m.id === "wnflb" && !m.logged_in) {
+        h += '<div class="loginForm"><div style="font-weight:600;margin-bottom:4px">账号登录</div>' +
+          '<input type="text" id="wnflbUser" placeholder="论坛账号" autocomplete="username">' +
+          '<input type="password" id="wnflbPass" placeholder="论坛密码" autocomplete="current-password">' +
+          '<div><button data-act="login">登录</button></div>' +
+          '<div class="captchaBox" id="wnflbCaptchaBox">' +
+          '<div style="font-size:13px;color:#888">本次登录需要验证码（点击图片可换一张）：</div>' +
+          '<img class="captchaImg" id="wnflbCaptchaImg" alt="验证码">' +
+          '<input type="text" id="wnflbCaptchaCode" placeholder="输入验证码" autocomplete="off">' +
+          '<div><button data-act="captcha">提交验证码</button></div></div></div>';
+      }
+      h += '<div class="msg" data-msg="' + esc(m.id) + '"></div>';
+      h += '</div>';
+      return h;
+    }).join("");
+
+    box.querySelectorAll("button").forEach(function (btn) {
+      btn.onclick = function () { onAction(btn.getAttribute("data-act"), btn); };
+    });
+    var ci = $("wnflbCaptchaImg");
+    if (ci) ci.onclick = loadCaptcha;
+  }
+
+  function modMsg(mid, t, ok) {
+    var el = document.querySelector('[data-msg="' + mid + '"]');
+    if (el) {
+      el.textContent = t;
+      el.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+    }
+  }
+
+  async function onAction(act, btn) {
+    var card = btn.closest(".card");
+    var mid = card.getAttribute("data-mid");
+    if (act === "run") {
+      btn.disabled = true;
+      modMsg(mid, "签到中…");
+      try {
+        var r = await api("POST", "/api/checkins/" + encodeURIComponent(mid) + "/run");
+        modMsg(mid, r.msg || (r.ok ? "完成" : "失败"), r.ok);
+      } catch (e) { if (e.message !== "401") modMsg(mid, "请求失败：" + e.message, false); }
+      btn.disabled = false;
+      refresh();
+    } else if (act === "login") {
+      var u = $("wnflbUser").value.trim(), p = $("wnflbPass").value;
+      if (!u || !p) { modMsg(mid, "请输入账号和密码", false); return; }
+      modMsg(mid, "登录中…");
+      try {
+        var r2 = await api("POST", "/api/wnflb/login", { username: u, password: p });
+        if (r2.ok) { modMsg(mid, "登录成功", true); captchaId = ""; refresh(); return; }
+        if (r2.need_captcha) {
+          captchaId = r2.captcha_id; captchaUser = u; captchaPass = p;
+          $("wnflbCaptchaBox").style.display = "block";
+          loadCaptcha();
+          modMsg(mid, "本次登录需要验证码，请识别并提交", false);
+          return;
+        }
+        modMsg(mid, r2.msg || "登录失败", false);
+      } catch (e) { if (e.message !== "401") modMsg(mid, "登录请求失败：" + e.message, false); }
+    } else if (act === "captcha") {
+      var code = $("wnflbCaptchaCode").value.trim();
+      if (!code) { modMsg(mid, "请输入验证码", false); return; }
+      modMsg(mid, "提交中…");
+      try {
+        var r3 = await api("POST", "/api/wnflb/captcha",
+          { id: captchaId, code: code, username: captchaUser, password: captchaPass });
+        if (r3.ok) { modMsg(mid, "登录成功", true); captchaId = ""; refresh(); return; }
+        if (r3.need_retry) {
+          captchaId = r3.captcha_id;
+          $("wnflbCaptchaCode").value = "";
+          loadCaptcha();
+          modMsg(mid, r3.msg || "验证码不正确，已换一张", false);
+          return;
+        }
+        modMsg(mid, r3.msg || "登录失败", false);
+      } catch (e) { if (e.message !== "401") modMsg(mid, "提交失败：" + e.message, false); }
+    } else if (act === "logout") {
+      try {
+        await api("POST", "/api/wnflb/logout");
+        modMsg(mid, "已退出登录", true);
+        refresh();
+      } catch (e) { if (e.message !== "401") modMsg(mid, "退出失败：" + e.message, false); }
+    }
+  }
+
+  function loadCaptcha() {
+    var headers = {};
+    var k = key();
+    if (k) headers["Authorization"] = "Bearer " + k;
+    fetch("/api/wnflb/captcha?id=" + encodeURIComponent(captchaId) + "&t=" + Date.now(),
+        { headers: headers })
+      .then(function (r) { if (!r.ok) throw new Error("拉取失败"); return r.blob(); })
+      .then(function (b) { $("wnflbCaptchaImg").src = URL.createObjectURL(b); })
+      .catch(function (e) { say("验证码拉取失败：" + e.message, false); });
+  }
+
+  async function refresh() {
+    try {
+      var r = await api("GET", "/api/checkins");
+      render(r.modules || []);
+    } catch (e) { if (e.message !== "401") say("加载失败：" + e.message, false); }
+  }
+
+  $("btnKey").onclick = function () {
+    var v = $("apiKeyInput").value;
+    try { sessionStorage.setItem(LS_KEY, v); } catch (e) {}
+    $("keyOverlay").style.display = "none";
+    refresh();
+  };
+
+  refresh();
+  setInterval(refresh, 15000);
+})();
+</script>
+</body>
+</html>
