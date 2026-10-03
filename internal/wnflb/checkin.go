@@ -51,8 +51,8 @@ func (s *Service) Credits() string {
 
 // probeTimeout 状态探测的网络超时：论坛对某些 IP 响应很慢，
 // 探测必须有短超时兜底，不能拖住签到中心列表接口。
-// （探测含首页+积分页两次请求，只在后台执行，故给到 15 秒。）
-var probeTimeout = 15 * time.Second
+// （探测最多三次请求，只在后台执行，故给到 20 秒。）
+var probeTimeout = 20 * time.Second
 
 // probeStale 探测缓存过期阈值：超过后 Summary 触发后台刷新（不阻塞当次请求）。
 const probeStale = 2 * time.Minute
@@ -60,8 +60,9 @@ const probeStale = 2 * time.Minute
 // HomeStatus 实时探测：一次请求同时返回登录态与积分，并回写缓存与状态文件。
 // 只供签到后通知等后台场景；状态接口请用 CachedHomeStatus。
 //
-// 注意：部分模板的论坛首页不渲染积分锚点（用户实测要点进版块页才有），
-// 首页解析不到积分时改抓积分页（spacecp credit）补一次。
+// 积分位置实测（用户账号 + 现成脚本印证）：论坛首页与积分页都不一定
+// 渲染积分；个人空间页（space-uid-{uid}.html）有"统计信息"块，
+// 形如 <em>积分</em>122。探测链：首页 → 个人空间页 → 积分页。
 func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,21 +76,43 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	credits = parseCredits(html)
 	src := "首页"
 	if credits == "" {
-		page, err := s.client.getTextCtx(ctx, s.creditURL(), nil)
-		if err != nil {
-			log.Printf("wnflb: 积分页抓取失败：%v", err)
-		} else {
-			credits = parseCredits(page)
-			src = "积分页"
+		if uid := discuzUID(html); uid != "" {
+			if page, err := s.client.getTextCtx(ctx, s.spaceURL(uid), nil); err == nil {
+				if c := parseCredits(page); c != "" {
+					credits, src = c, "个人空间页"
+				}
+			}
 		}
 	}
 	if credits == "" {
-		log.Printf("wnflb: 积分探测：首页与积分页都未解析到积分")
+		if page, err := s.client.getTextCtx(ctx, s.creditURL(), nil); err == nil {
+			if c := parseCredits(page); c != "" {
+				credits, src = c, "积分页"
+			}
+		} else {
+			log.Printf("wnflb: 积分页抓取失败：%v", err)
+		}
+	}
+	if credits == "" {
+		log.Printf("wnflb: 积分探测：首页/空间页/积分页都未解析到积分")
 	} else {
 		log.Printf("wnflb: 积分探测（%s）当前积分 %s", src, credits)
 	}
 	s.storeProbe(true, credits)
 	return true, credits
+}
+
+// discuzUID 从页面脚本变量提取当前登录用户 ID。
+func discuzUID(html string) string {
+	if m := reDiscuzUID.FindStringSubmatch(html); m != nil && m[1] != "0" {
+		return m[1]
+	}
+	return ""
+}
+
+// spaceURL 个人空间页地址（统计信息块含积分）。
+func (s *Service) spaceURL(uid string) string {
+	return s.baseURL + "/space-uid-" + uid + ".html"
 }
 
 // creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。

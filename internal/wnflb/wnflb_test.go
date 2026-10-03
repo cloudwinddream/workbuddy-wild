@@ -123,6 +123,11 @@ func TestParseCredits(t *testing.T) {
 	if got := parseCredits(`<ul><li><em>积分</em>122</li><li><em>金钱</em>3</li></ul>`); got != "122" {
 		t.Errorf("em 布局 parseCredits = %q, want 122", got)
 	}
+	// 个人空间页统计信息块布局
+	space := `<div class="stat"><ul><li><em>积分</em> 456</li><li><em>金币</em> 7</li></ul></div>`
+	if got := parseCredits(space); got != "456" {
+		t.Errorf("空间页布局 parseCredits = %q, want 456", got)
+	}
 }
 
 func TestDetectCaptcha(t *testing.T) {
