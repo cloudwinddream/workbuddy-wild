@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -190,12 +191,33 @@ func (c *Client) getBytes(url string, headers map[string]string) ([]byte, error)
 
 // decodeBody 优先按 UTF-8 解码（实测论坛返回 UTF-8），否则按 GBK 解码
 // （上游脚本注明论坛为 GBK，历史页面/代理可能返回 GBK）。
+// decodeBody 把论坛页面解码为 UTF-8 文本。
+//
+// 编码策略（实测教训）：不能"整页 utf8.Valid 才按 UTF-8、否则整页按
+// GBK"——已登录页面常混有个别 GBK 编码的历史内容（老帖标题等），
+// 一个坏字节就会让整页被 GBK 转码，全页中文变乱码（积分锚点也随之
+// 丢失，而 ASCII 的 discuz_uid 等不受影响，极具迷惑性）。
+// 故：页面声明 GBK 才按 GBK；否则按 UTF-8 容错解码（坏字节变 �，
+// 只坏那几个字，不伤全页）。
 func decodeBody(raw []byte) string {
+	if declaresGBK(raw) {
+		if out, _, err := transform.Bytes(simplifiedchinese.GBK.NewDecoder(), raw); err == nil {
+			return string(out)
+		}
+	}
 	if utf8.Valid(raw) {
 		return string(raw)
 	}
-	if out, _, err := transform.Bytes(simplifiedchinese.GBK.NewDecoder(), raw); err == nil {
-		return string(out)
+	return strings.ToValidUTF8(string(raw), "�")
+}
+
+// declaresGBK 页面是否声明 GBK 系编码（看头部 meta charset）。
+var reDeclaredGBK = regexp.MustCompile(`(?i)charset\s*=\s*"?gb(?:k|2312|18030)`)
+
+func declaresGBK(raw []byte) bool {
+	head := raw
+	if len(head) > 4096 {
+		head = head[:4096]
 	}
-	return string(raw)
+	return reDeclaredGBK.Match(head)
 }
