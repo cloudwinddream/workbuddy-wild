@@ -33,6 +33,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/notify"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
+	"github.com/rockswang/workbuddy-wild/internal/quark"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
 	"github.com/rockswang/workbuddy-wild/internal/smzdm"
@@ -159,6 +160,17 @@ func main() {
 		}
 	}
 
+	// ---- 夸克网盘签到（独立模块，单账号，Go 原生实现） ----
+	// 协议逆向来自 Cp0204/quark-auto-save 与 Liu8Can/Quark_Auto_Check_In
+	// 的签到部分：Cookie 含 kps/sign/vcode，成长接口领每日签到空间。
+	quarkSvc := quark.New(filepath.Join(stateDir, "quark"), os.Getenv("QUARK_BASE_URL"))
+	// .env 引导：无存档 Cookie 且给了 Cookie 时自动导入（网页提交仍可覆盖）。
+	if ck := strings.TrimSpace(os.Getenv("QUARK_COOKIE")); ck != "" {
+		if quarkSvc.ImportCookieFromEnv(ck) {
+			log.Printf("quark: 已从环境变量导入 Cookie")
+		}
+	}
+
 	// ---- 签到结果 Bark 推送通知 ----
 	bark, barkErr := notify.Open(filepath.Join(stateDir, "notify"))
 	if barkErr != nil {
@@ -166,6 +178,7 @@ func main() {
 	} else {
 		wnflbSvc.SetNotifier(bark)
 		smzdmSvc.SetNotifier(bark)
+		quarkSvc.SetNotifier(bark)
 	}
 
 	api := webapi.New(webapi.Options{
@@ -179,6 +192,7 @@ func main() {
 		SetListen:           setListen,
 		Wnflb:               wnflbSvc,
 		Smzdm:               smzdmSvc,
+		Quark:               quarkSvc,
 		CheckinTimesFn:      unifiedTimesFn,
 		CheckinTimesChanged: unifiedTimesChanged,
 		Notify:              bark,
@@ -225,6 +239,9 @@ func main() {
 	// 什么值得买每日签到（跟随统一签到时间）。
 	smzdmRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("SMZDM_RUN_ON_STARTUP"))) != "false"
 	go checkin.RunScheduler(sctx, unifiedTimesFn, smzdmRunOnStartup, "什么值得买签到", smzdmSvc.AutoCheckin)
+	// 夸克网盘每日签到（跟随统一签到时间）。
+	quarkRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("QUARK_RUN_ON_STARTUP"))) != "false"
+	go checkin.RunScheduler(sctx, unifiedTimesFn, quarkRunOnStartup, "夸克网盘签到", quarkSvc.AutoCheckin)
 
 	// ---- HTTP 服务 ----
 	if err := setListen(cfg.Listen.Host, cfg.Listen.Port); err != nil {

@@ -158,13 +158,13 @@ docker compose up -d --build
 
 - **左栏（全部签到内容）**：总积分与分平台积分、WorkBuddy / TraeWork
   账号（当前积分、上次签到结果、立即签到 / 刷新 / 删除、按账号单独的
-  Bark 设备）、第三方签到（福利吧、什么值得买）、全部签到 / 全部刷新。
+  Bark 设备）、第三方签到（福利吧、什么值得买、夸克网盘）、全部签到 / 全部刷新。
 - **右栏（设置，只剩两块）**：
   - **推送设置 · Bark**：统一默认设备 Key——所有签到结果默认推到它；
     个别账号想推到别的手机时，在该账号卡片里单独设置专属 Key（回退链：
     账号 → 平台/模块 → 默认）。
   - **签到设置**：全部签到共用的每日签到时间（时间 chips，改后即时生效，
-    WorkBuddy / TraeWork / 福利吧 / 什么值得买 一起跟随）；兜底规则：签到失败（限流）自动延迟重试（10 分钟起
+    WorkBuddy / TraeWork / 福利吧 / 什么值得买 / 夸克网盘 一起跟随）；兜底规则：签到失败（限流）自动延迟重试（10 分钟起
     递增，单账号每天最多 6 次），服务启动时对"已错过签到时刻且今日未签"
     的账号自动补签（`WB2A_CATCHUP_ON_STARTUP` 可关，默认开）。
 
@@ -182,6 +182,16 @@ docker compose up -d --build
 每日签到、签到奖励与连续签到额外奖励领取。
 认证方式为 APP 抓包 Cookie（须包含 `sess` 字段），无账号密码登录；
 Cookie 可在签到中心页面直接粘贴，也可走 `SMZDM_COOKIE` 环境变量。
+
+以及：**夸克网盘**（`quark.cn`，每日签到领空间）。
+协议逆向来自开源项目 https://github.com/Cp0204/quark-auto-save 与
+https://github.com/Liu8Can/Quark_Auto_Check_In 的签到部分
+（`internal/quark`）：Cookie 中提取 `kps`/`sign`/`vcode` 调成长接口，
+每日签到领取空间；卡片显示总空间、签到累计、连签进度，Bark 同步推送。
+认证方式为网页版 Cookie（浏览器登录 `pan.quark.cn` 后复制完整 Cookie，
+须包含 `kps`、`sign`、`vcode`），可在签到控制台页面直接粘贴，
+也可走 `QUARK_COOKIE` 环境变量；签到时间跟随统一签到时间，
+启动后默认先跑一次（`QUARK_RUN_ON_STARTUP=false` 可关）。
 
 ```bash
 # 账号密码填在 .env 里（容器首次启动自动导入；也可在签到中心页面直接登录）

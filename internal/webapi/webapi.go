@@ -25,6 +25,7 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/notify"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
 	"github.com/rockswang/workbuddy-wild/internal/provider"
+	"github.com/rockswang/workbuddy-wild/internal/quark"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
 	"github.com/rockswang/workbuddy-wild/internal/smzdm"
@@ -54,6 +55,9 @@ type Options struct {
 
 	// Smzdm 什么值得买签到服务（nil 表示未启用）。
 	Smzdm *smzdm.Service
+
+	// Quark 夸克网盘签到服务（nil 表示未启用）。
+	Quark *quark.Service
 
 	// CheckinTimesFn 统一签到时间提供者：福利吧 / 什么值得买与主账号
 	// 共用同一套签到时间，模块展示与调度都从这里读（可为 nil）。
@@ -97,6 +101,7 @@ type API struct {
 
 	wnflb *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
 	smzdm *smzdm.Service // 什么值得买签到（可为 nil 表示未启用）
+	quark *quark.Service // 夸克网盘签到（可为 nil 表示未启用）
 
 	checkinTimesFn      func() []string // 统一签到时间提供者（模块展示用）
 	checkinTimesChanged func([]string)  // 签到时间变更回调（通知宿主）
@@ -132,6 +137,7 @@ func New(opts Options) *API {
 		apiKey:              opts.Config.APIKey,
 		wnflb:               opts.Wnflb,
 		smzdm:               opts.Smzdm,
+		quark:               opts.Quark,
 		checkinTimesFn:      opts.CheckinTimesFn,
 		checkinTimesChanged: opts.CheckinTimesChanged,
 		notify:              opts.Notify,
@@ -152,6 +158,9 @@ func New(opts Options) *API {
 	}
 	if opts.Smzdm != nil {
 		a.checkins.Register(smzdm.NewAdapter(opts.Smzdm, opts.CheckinTimesFn))
+	}
+	if opts.Quark != nil {
+		a.checkins.Register(quark.NewAdapter(opts.Quark, opts.CheckinTimesFn))
 	}
 	return a
 }
@@ -179,6 +188,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", a.withAuth(a.handleEvents))
 	a.registerWnflb(mux)
 	a.registerSmzdm(mux)
+	a.registerQuark(mux)
 	a.registerNotify(mux)
 	a.registerCheckins(mux)
 }

@@ -153,6 +153,7 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
 .acct-icon.icon-trae { background: #0d9488; }
 .acct-icon.icon-wnflb { background: #d97706; }
 .acct-icon.icon-smzdm { background: #dc2626; }
+.acct-icon.icon-quark { background: #4f46e5; }
 .acct-name { font-weight: 700; font-size: 17.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .acct-name .uname { font-weight: 400; font-size: 13.5px; color: var(--muted); margin-left: 6px; }
 .acct-credits { font-size: 20px; font-weight: 700; font-family: var(--mono); color: var(--ok); flex: none; }
@@ -586,8 +587,8 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
   // 第三方模块卡片（福利吧 / 什么值得买）
   // ---------------------------------------------------------------------------
   function moduleCard(m) {
-    var icon = m.id === "wnflb" ? "福" : (m.id === "smzdm" ? "值" : "签");
-    var cls = m.id === "wnflb" ? "icon-wnflb" : "icon-smzdm";
+    var icon = m.id === "wnflb" ? "福" : (m.id === "smzdm" ? "值" : (m.id === "quark" ? "夸" : "签"));
+    var cls = m.id === "wnflb" ? "icon-wnflb" : (m.id === "quark" ? "icon-quark" : "icon-smzdm");
     var badge;
     if (!m.configured) badge = '<span class="badge b-mut">未配置</span>';
     else if (!m.logged_in) badge = '<span class="badge b-err">登录已过期</span>';
@@ -609,6 +610,7 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
       '<button class="btn go small" data-mact="run">立即签到</button>';
     if (m.id === "wnflb" && m.logged_in) h += '<button class="btn small" data-mact="logout">退出登录</button>';
     if (m.id === "smzdm" && m.logged_in) h += '<button class="btn small" data-mact="smzdm-logout">清除 Cookie</button>';
+    if (m.id === "quark" && m.logged_in) h += '<button class="btn small" data-mact="quark-logout">清除 Cookie</button>';
     h += '</span></div>';
     // 福利吧登录表单（未登录时展开）
     if (m.id === "wnflb" && !m.logged_in) {
@@ -629,6 +631,14 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
         '<textarea class="input" id="smzdmCookie" rows="3" style="font-family:var(--mono);font-size:13px;margin-top:6px" ' +
         'placeholder="sess=...; smzdm_id=...; device_id=...; ..."></textarea>' +
         '<div class="row"><button class="btn primary" data-mact="smzdm-save">保存 Cookie</button></div></div>';
+    }
+    // 夸克网盘 Cookie 表单（未配置时展开）
+    if (m.id === "quark" && !m.logged_in) {
+      h += '<div class="subform"><div class="f-title">Cookie 配置</div>' +
+        '<div class="hint" style="margin-top:0">浏览器登录 pan.quark.cn 后复制完整 Cookie（须包含 kps、sign、vcode），粘贴到下方：</div>' +
+        '<textarea class="input" id="quarkCookie" rows="3" style="font-family:var(--mono);font-size:13px;margin-top:6px" ' +
+        'placeholder="kps=...; sign=...; vcode=...; ..."></textarea>' +
+        '<div class="row"><button class="btn primary" data-mact="quark-save">保存 Cookie</button></div></div>';
     }
     var mb = moduleBark[m.id] || {};
     h += '<div class="acct-row3">' + barkLineHTML(!!mb.set, mb.key) + '</div>';
@@ -724,6 +734,21 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
       try {
         await api("POST", "/api/smzdm/logout");
         toast("已清除什么值得买 Cookie");
+        loadModules();
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "清除失败：" + e.message, false); }
+    } else if (act === "quark-save") {
+      var qk = $("quarkCookie").value.trim();
+      if (!qk) { setMsg(msgEl, "请粘贴 Cookie", false); return; }
+      setMsg(msgEl, "保存中…");
+      try {
+        var r5 = await api("POST", "/api/quark/cookie", { cookie: qk });
+        if (r5.ok) { toast(r5.msg + (r5.nickname ? "（" + r5.nickname + "）" : "")); loadModules(); return; }
+        setMsg(msgEl, msgOf(r5, "保存失败"), false);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "保存失败：" + e.message, false); }
+    } else if (act === "quark-logout") {
+      try {
+        await api("POST", "/api/quark/logout");
+        toast("已清除夸克网盘 Cookie");
         loadModules();
       } catch (e) { if (e.message !== "401") setMsg(msgEl, "清除失败：" + e.message, false); }
     }
