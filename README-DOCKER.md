@@ -188,8 +188,10 @@ Cookie 可在签到中心页面直接粘贴，也可走 `SMZDM_COOKIE` 环境变
 https://github.com/Liu8Can/Quark_Auto_Check_In 的签到部分
 （`internal/quark`）：Cookie 中提取 `kps`/`sign`/`vcode` 调成长接口，
 每日签到领取空间；卡片显示总空间、签到累计、连签进度，Bark 同步推送。
-认证方式为网页版 Cookie（浏览器登录 `pan.quark.cn` 后复制完整 Cookie，
-须包含 `kps`、`sign`、`vcode`），可在签到控制台页面直接粘贴，
+认证方式为夸克 APP 抓包凭证（网页版 `pan.quark.cn` 的 Cookie 里**没有**
+这三个参数）：用 Reqable/ProxyPin 等工具抓夸克 APP，复制任意
+`drive-m.quark.cn` 请求的完整 URL（内含 `kps`/`sign`/`vcode`），
+粘贴到签到控制台页面即可（含这三个参数的 Cookie 也可），
 也可走 `QUARK_COOKIE` 环境变量；签到时间跟随统一签到时间，
 启动后默认先跑一次（`QUARK_RUN_ON_STARTUP=false` 可关）。
 

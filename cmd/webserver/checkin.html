@@ -635,9 +635,9 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
     // 夸克网盘 Cookie 表单（未配置时展开）
     if (m.id === "quark" && !m.logged_in) {
       h += '<div class="subform"><div class="f-title">Cookie 配置</div>' +
-        '<div class="hint" style="margin-top:0">浏览器登录 pan.quark.cn 后复制完整 Cookie（须包含 kps、sign、vcode），粘贴到下方：</div>' +
+        '<div class="hint" style="margin-top:0">用 Reqable 等抓包工具打开夸克 APP，复制 drive-m.quark.cn 请求的完整 URL（内含 kps、sign、vcode）粘贴到下方；含这三个参数的 Cookie 也可：</div>' +
         '<textarea class="input" id="quarkCookie" rows="3" style="font-family:var(--mono);font-size:13px;margin-top:6px" ' +
-        'placeholder="kps=...; sign=...; vcode=...; ..."></textarea>' +
+        'placeholder="https://drive-m.quark.cn/...&kps=...&sign=...&vcode=..."></textarea>' +
         '<div class="row"><button class="btn primary" data-mact="quark-save">保存 Cookie</button></div></div>';
     }
     var mb = moduleBark[m.id] || {};

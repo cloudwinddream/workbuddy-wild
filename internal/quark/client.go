@@ -60,7 +60,7 @@ func ExtractParams(raw string) (kps, sign, vcode string, err error) {
 		missing = append(missing, "vcode")
 	}
 	if len(missing) > 0 {
-		return "", "", "", fmt.Errorf("Cookie 中缺少 %s，请粘贴夸克网盘的完整 Cookie", strings.Join(missing, "/"))
+		return "", "", "", fmt.Errorf("没找到 %s：网页版 Cookie 里没有这三个参数，请从夸克 APP 抓包复制 drive-m.quark.cn 请求的完整 URL", strings.Join(missing, "/"))
 	}
 	return kps, sign, vcode, nil
 }
