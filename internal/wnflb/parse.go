@@ -9,6 +9,7 @@ var (
 	reFormhash      = regexp.MustCompile(`name="formhash"\s+value="([a-f0-9]+)"`)
 	reLoginhash     = regexp.MustCompile(`loginhash=([A-Za-z0-9]+)`)
 	reDiscuzUID     = regexp.MustCompile(`discuz_uid\s*=\s*'(\d+)'`)
+	reBoardLink     = regexp.MustCompile(`href="(forum-\d+-1\.html)"`)
 	reAuth          = regexp.MustCompile(`name="auth"\s+value="([A-Za-z0-9%_./=+]+)"`)
 	reUpdateseccode = regexp.MustCompile(`updateseccode\(\s*['"]([A-Za-z0-9]+)['"]`)
 	reSeccodeSpan   = regexp.MustCompile(`id="seccode_([A-Za-z0-9]+)"`)

@@ -96,22 +96,21 @@ func TestProbeResultPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// 部分模板论坛首页不渲染积分（用户实测）：探测应先回退个人空间页
-// （统计信息块 <em>积分</em>122），再回退积分页。
+// 论坛首页不渲染积分（用户实测要点进版块页才有）：探测应提取
+// 首页第一个版块链接（forum-2-1.html）去版块页取积分。
 func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 	withProbeTimeout(t, 10*time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch {
-		case strings.Contains(r.URL.Path, "space-uid-"):
-			// 个人空间页：统计信息块
-			_, _ = w.Write([]byte(`<html><body><ul><li><em>积分</em> 888</li></ul></body></html>`))
+		case strings.Contains(r.URL.Path, "forum-2-1.html"):
+			// 版块页：带积分锚点的页眉（用户实测原样）
+			_, _ = w.Write([]byte(`<html><body><a href="home.php?mod=spacecp&amp;ac=credit&amp;showcredit=1" id="extcreditmenu">积分: 888</a></body></html>`))
 		case r.URL.Query().Get("ac") == "credit":
-			// 积分页：表格布局
 			_, _ = w.Write([]byte(`<html><body><table><tr><th>积分</th><td>122</td></tr></table></body></html>`))
 		default:
-			// 论坛首页：已登录但没有积分
-			_, _ = w.Write([]byte(`<html><script>var discuz_uid = '9527';</script><body>欢迎回来</body></html>`))
+			// 论坛首页：已登录、含版块链接，但没有积分
+			_, _ = w.Write([]byte(`<html><script>var discuz_uid = '9527';</script><body><a href="forum-2-1.html">版块</a></body></html>`))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -119,6 +118,6 @@ func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 	s := New(t.TempDir(), srv.URL)
 	loggedIn, credits := s.HomeStatus()
 	if !loggedIn || credits != "888" {
-		t.Fatalf("空间页回退 = (%v, %q), want (true, 888)", loggedIn, credits)
+		t.Fatalf("版块页回退 = (%v, %q), want (true, 888)", loggedIn, credits)
 	}
 }

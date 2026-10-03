@@ -77,18 +77,14 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	credits = parseCredits(html)
 	src := "首页"
 	if credits == "" {
-		uid := discuzUID(html)
-		if uid == "" {
-			log.Printf("wnflb: 积分探测：首页未提取到 discuz_uid，跳过空间页")
-		}
-		// 候选页依次尝试：个人空间页 → 个人资料页 → 积分页。
+		// 候选页依次尝试：版块页（用户实测有积分锚点）→ 签到列表页 → 积分页。
+		// （个人空间/资料页在本论坛会重定向回首页，已实测无效，不再试。）
 		type cand struct{ name, url string }
 		cands := []cand{{"积分页", s.creditURL()}}
-		if uid != "" {
-			cands = append([]cand{
-				{"个人空间页", s.spaceURL(uid)},
-				{"个人资料页", s.profileURL(uid)},
-			}, cands...)
+		if link := s.firstBoardLink(html); link != "" {
+			cands = append([]cand{{"版块页", link}, {"签到列表页", s.checkinListURL()}}, cands...)
+		} else {
+			cands = append([]cand{{"签到列表页", s.checkinListURL()}}, cands...)
 		}
 		for _, cd := range cands {
 			page, err := s.client.getTextCtx(ctx, cd.url, nil)
@@ -120,22 +116,18 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	return true, credits
 }
 
-// discuzUID 从页面脚本变量提取当前登录用户 ID。
-func discuzUID(html string) string {
-	if m := reDiscuzUID.FindStringSubmatch(html); m != nil && m[1] != "0" {
-		return m[1]
+// firstBoardLink 从论坛首页提取第一个版块页链接（绝对地址）。
+// 版块页渲染带积分锚点的完整页眉，论坛首页则不一定。
+func (s *Service) firstBoardLink(html string) string {
+	if m := reBoardLink.FindStringSubmatch(html); m != nil {
+		return s.baseURL + "/" + m[1]
 	}
 	return ""
 }
 
-// spaceURL 个人空间页地址（统计信息块含积分）。
-func (s *Service) spaceURL(uid string) string {
-	return s.baseURL + "/space-uid-" + uid + ".html"
-}
-
-// profileURL 个人资料页地址（同为积分候选页）。
-func (s *Service) profileURL(uid string) string {
-	return s.baseURL + "/home.php?mod=space&uid=" + uid + "&do=profile"
+// checkinListURL 签到列表页地址（插件页，带完整页眉）。
+func (s *Service) checkinListURL() string {
+	return s.baseURL + "/plugin.php?id=fx_checkin:list"
 }
 
 // creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。
