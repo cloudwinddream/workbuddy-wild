@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -76,25 +77,42 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	credits = parseCredits(html)
 	src := "首页"
 	if credits == "" {
-		if uid := discuzUID(html); uid != "" {
-			if page, err := s.client.getTextCtx(ctx, s.spaceURL(uid), nil); err == nil {
-				if c := parseCredits(page); c != "" {
-					credits, src = c, "个人空间页"
-				}
-			}
+		uid := discuzUID(html)
+		if uid == "" {
+			log.Printf("wnflb: 积分探测：首页未提取到 discuz_uid，跳过空间页")
 		}
-	}
-	if credits == "" {
-		if page, err := s.client.getTextCtx(ctx, s.creditURL(), nil); err == nil {
+		// 候选页依次尝试：个人空间页 → 个人资料页 → 积分页。
+		type cand struct{ name, url string }
+		cands := []cand{{"积分页", s.creditURL()}}
+		if uid != "" {
+			cands = append([]cand{
+				{"个人空间页", s.spaceURL(uid)},
+				{"个人资料页", s.profileURL(uid)},
+			}, cands...)
+		}
+		for _, cd := range cands {
+			page, err := s.client.getTextCtx(ctx, cd.url, nil)
+			if err != nil {
+				log.Printf("wnflb: 积分探测：%s抓取失败：%v", cd.name, err)
+				continue
+			}
 			if c := parseCredits(page); c != "" {
-				credits, src = c, "积分页"
+				credits, src = c, cd.name
+				break
 			}
-		} else {
-			log.Printf("wnflb: 积分页抓取失败：%v", err)
+			// 诊断：页面里有"积分"却没解析出来时，打印其上下文供补模式。
+			if i := strings.Index(page, "积分"); i >= 0 {
+				lo := max(0, i-50)
+				hi := min(len(page), i+110)
+				snip := strings.ReplaceAll(page[lo:hi], "\n", " ")
+				log.Printf("wnflb: 积分探测：%s未解析，积分上下文：…%s…", cd.name, snip)
+			} else {
+				log.Printf("wnflb: 积分探测：%s未解析（%d 字节，无积分字样）", cd.name, len(page))
+			}
 		}
 	}
 	if credits == "" {
-		log.Printf("wnflb: 积分探测：首页/空间页/积分页都未解析到积分")
+		log.Printf("wnflb: 积分探测：所有候选页都未解析到积分")
 	} else {
 		log.Printf("wnflb: 积分探测（%s）当前积分 %s", src, credits)
 	}
@@ -113,6 +131,11 @@ func discuzUID(html string) string {
 // spaceURL 个人空间页地址（统计信息块含积分）。
 func (s *Service) spaceURL(uid string) string {
 	return s.baseURL + "/space-uid-" + uid + ".html"
+}
+
+// profileURL 个人资料页地址（同为积分候选页）。
+func (s *Service) profileURL(uid string) string {
+	return s.baseURL + "/home.php?mod=space&uid=" + uid + "&do=profile"
 }
 
 // creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。
