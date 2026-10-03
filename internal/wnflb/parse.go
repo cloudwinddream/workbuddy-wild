@@ -157,10 +157,14 @@ func parseCheckinResult(text string) checkinResult {
 }
 
 var reCredits = []*regexp.Regexp{
-	// 积分: 1234 / 积分：1,234
+	// 积分: 1234 / 积分：1,234（含总积分： 122）
 	regexp.MustCompile(`积分\s*[：:]\s*([\d,]+)`),
 	// >积分 1234< 之类的紧凑写法
 	regexp.MustCompile(`>积分\s*([\d,]+)<`),
+	// 表格布局：<th>积分</th><td>1234</td>
+	regexp.MustCompile(`积分\s*</[^>]+>\s*<[^>]+>\s*([\d,]+)`),
+	// 积分锚点后跟子元素：积分：<span>1234</span>
+	regexp.MustCompile(`积分\s*[：:]\s*<[^>]+>\s*([\d,]+)`),
 }
 
 // parseCredits 从已登录首页 HTML 解析当前积分，解析不到返回 ""。

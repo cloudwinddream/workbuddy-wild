@@ -106,6 +106,19 @@ func TestParseCredits(t *testing.T) {
 	if got := parseCredits(`<div>无积分信息</div>`); got != "" {
 		t.Errorf("无积分时应返回空，got %q", got)
 	}
+	// 用户实测的页面锚点原样（属性很多、半角冒号）
+	real := `<a href="home.php?mod=spacecp&amp;ac=credit&amp;showcredit=1" id="extcreditmenu" onmouseover="delayShow(this, showCreditmenu);" class="showmenu" initialized="true">积分: 122</a>`
+	if got := parseCredits(real); got != "122" {
+		t.Errorf("真实锚点 parseCredits = %q, want 122", got)
+	}
+	// 积分页表格布局
+	if got := parseCredits(`<table><tr><th>积分</th><td>888</td></tr></table>`); got != "888" {
+		t.Errorf("表格布局 parseCredits = %q, want 888", got)
+	}
+	// 数字在子元素里
+	if got := parseCredits(`<span>积分：<em>66</em></span>`); got != "66" {
+		t.Errorf("子元素布局 parseCredits = %q, want 66", got)
+	}
 }
 
 func TestDetectCaptcha(t *testing.T) {

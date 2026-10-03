@@ -51,13 +51,17 @@ func (s *Service) Credits() string {
 
 // probeTimeout 状态探测的网络超时：论坛对某些 IP 响应很慢，
 // 探测必须有短超时兜底，不能拖住签到中心列表接口。
-var probeTimeout = 10 * time.Second
+// （探测含首页+积分页两次请求，只在后台执行，故给到 15 秒。）
+var probeTimeout = 15 * time.Second
 
 // probeStale 探测缓存过期阈值：超过后 Summary 触发后台刷新（不阻塞当次请求）。
 const probeStale = 2 * time.Minute
 
 // HomeStatus 实时探测：一次请求同时返回登录态与积分，并回写缓存与状态文件。
 // 只供签到后通知等后台场景；状态接口请用 CachedHomeStatus。
+//
+// 注意：部分模板的论坛首页不渲染积分锚点（用户实测要点进版块页才有），
+// 首页解析不到积分时改抓积分页（spacecp credit）补一次。
 func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,8 +73,18 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 		return false, ""
 	}
 	credits = parseCredits(html)
+	if credits == "" {
+		if page, err := s.client.getTextCtx(ctx, s.creditURL(), nil); err == nil {
+			credits = parseCredits(page)
+		}
+	}
 	s.storeProbe(true, credits)
 	return true, credits
+}
+
+// creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。
+func (s *Service) creditURL() string {
+	return s.baseURL + "/home.php?mod=spacecp&ac=credit&showcredit=1"
 }
 
 // storeProbe 更新内存缓存并落盘探测结果。

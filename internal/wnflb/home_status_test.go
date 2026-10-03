@@ -94,3 +94,26 @@ func TestProbeResultPersistsAcrossRestart(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// 部分模板论坛首页不渲染积分锚点（用户实测要点进版块页才有）：
+// 首页解析不到积分时，探测应回退抓积分页拿到积分。
+func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
+	withProbeTimeout(t, 5*time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Query().Get("ac") == "credit" {
+			// 积分页：表格布局
+			_, _ = w.Write([]byte(`<html><body><table><tr><th>积分</th><td>122</td></tr></table></body></html>`))
+			return
+		}
+		// 论坛首页：已登录但没有积分锚点
+		_, _ = w.Write([]byte(`<html><script>var discuz_uid = '9527';</script><body>欢迎回来</body></html>`))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := New(t.TempDir(), srv.URL)
+	loggedIn, credits := s.HomeStatus()
+	if !loggedIn || credits != "122" {
+		t.Fatalf("回退探测 = (%v, %q), want (true, 122)", loggedIn, credits)
+	}
+}
