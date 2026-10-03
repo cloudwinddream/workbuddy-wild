@@ -11,6 +11,7 @@ package wnflb
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -34,11 +35,10 @@ type Service struct {
 
 	// 首页状态探测缓存：Summary（状态接口）只读缓存、不打网络；
 	// 实际探测由 HomeStatus 执行并回写缓存 + status.json 落盘。
-	probeMu       sync.Mutex
-	probeAt       time.Time // 上次探测完成时间
-	probeLoggedIn bool
-	probeCredits  string
-	probing       int32 // 原子标志：后台刷新进行中（单飞）
+	probeMu sync.Mutex
+	probeAt time.Time // 上次探测完成时间
+	probe   ProbeData // 上次探测结果
+	probing int32     // 原子标志：后台刷新进行中（单飞）
 
 	statusMu sync.Mutex // status.json 的读-改-写串行化
 
@@ -48,7 +48,8 @@ type Service struct {
 // SetNotifier 设置签到结果推送器（Bark）。
 func (s *Service) SetNotifier(b *notify.Bark) { s.notifier = b }
 
-// notifyResult 发送签到结果通知：结果文案 + 当前积分。
+// notifyResult 发送签到结果通知：结果文案 + 账号信息行
+// （用户名/等级/积分/金币/连续·累计签到天数，签到后实时探测）。
 func (s *Service) notifyResult(ok bool, msg string) {
 	if s.notifier == nil {
 		return
@@ -57,12 +58,30 @@ func (s *Service) notifyResult(ok bool, msg string) {
 	if !ok {
 		title = "福利吧签到失败 ❌"
 	}
-	body := msg
-	if _, credits := s.HomeStatus(); credits != "" {
-		body += "\n当前积分：" + credits
+	lines := []string{msg}
+	d := s.HomeStatus()
+	if username, has := s.QuickStatus(); has && username != "" {
+		lines = append(lines, "👤 用户名: "+username)
 	}
-	s.notifier.Send("wnflb", title, body)
+	if d.Group != "" {
+		lines = append(lines, "👑 用户等级: "+d.Group)
+	}
+	if d.Credits != "" {
+		lines = append(lines, "📊 积分: "+d.Credits)
+	}
+	if d.Coins != "" {
+		lines = append(lines, "💰 金币: "+d.Coins)
+	}
+	if d.Streak > 0 {
+		lines = append(lines, "📅 已连续签到"+itoa(d.Streak)+"天")
+	}
+	if d.Total > 0 {
+		lines = append(lines, "📆 累计签到"+itoa(d.Total)+"天")
+	}
+	s.notifier.Send("wnflb", title, strings.Join(lines, "\n"))
 }
+
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
 
 // Challenge 一次验证码挑战的服务端状态（内存，5 分钟有效）。
 type Challenge struct {

@@ -17,6 +17,7 @@ type Summary struct {
 	Username   string `json:"username"`
 	Points     string `json:"points"`      // 积分（解析不到为空）
 	PointsName string `json:"points_name"` // 积分名称，如"积分"
+	Detail     string `json:"detail"`      // 附加信息行（等级·金币·签到天数等，可空）
 	LastOK     bool   `json:"last_ok"`
 	LastMsg    string `json:"last_msg"`
 	LastAt     string `json:"last_at"`

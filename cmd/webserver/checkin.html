@@ -158,6 +158,7 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
 .acct-credits { font-size: 20px; font-weight: 700; font-family: var(--mono); color: var(--ok); flex: none; }
 .acct-credits .unit { font-size: 12.5px; font-weight: 400; color: var(--muted); margin-left: 3px; }
 .acct-row2 { display: flex; align-items: center; gap: 8px; margin-top: 5px; flex-wrap: wrap; }
+.acct-detail { font-size: 14px; color: var(--accent2); margin-top: 4px; }
 .acct-status { font-size: 14px; color: var(--muted); flex: 1; min-width: 200px; }
 .acct-status.ok { color: var(--ok); }
 .acct-status.err { color: var(--err); }
@@ -598,6 +599,7 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
       badge +
       '<span class="acct-credits">' + (m.points ? esc(m.points) : "—") +
       '<span class="unit">' + esc(m.points_name || "积分") + '</span></span></div>';
+    if (m.detail) h += '<div class="acct-detail">' + esc(m.detail) + '</div>';
     var st = m.last_at ? ('上次签到 ' + esc(m.last_at) + ' · ' +
       (m.last_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
       (m.last_msg ? ' ' + esc(m.last_msg) : '')) : '尚未签到';

@@ -36,13 +36,13 @@ func TestCachedHomeStatusNeverBlocks(t *testing.T) {
 	s := New(t.TempDir(), srv.URL)
 
 	start := time.Now()
-	loggedIn, credits := s.CachedHomeStatus()
+	d := s.CachedHomeStatus()
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("CachedHomeStatus 阻塞了 %v，应立即返回", elapsed)
 	}
 	// 无任何缓存/落盘记录时返回零值即可（后台会异步刷新）
-	if loggedIn || credits != "" {
-		t.Fatalf("无缓存时应返回零值，got loggedIn=%v credits=%q", loggedIn, credits)
+	if d.LoggedIn || d.Credits != "" {
+		t.Fatalf("无缓存时应返回零值，got %+v", d)
 	}
 }
 
@@ -53,12 +53,12 @@ func TestHomeStatusRespectsProbeTimeout(t *testing.T) {
 	s := New(t.TempDir(), srv.URL)
 
 	start := time.Now()
-	loggedIn, credits := s.HomeStatus()
+	d := s.HomeStatus()
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("HomeStatus 阻塞了 %v，探测超时未生效", elapsed)
 	}
-	if loggedIn || credits != "" {
-		t.Fatalf("探测超时应返回未登录，got loggedIn=%v credits=%q", loggedIn, credits)
+	if d.LoggedIn || d.Credits != "" {
+		t.Fatalf("探测超时应返回未登录，got %+v", d)
 	}
 }
 
@@ -74,17 +74,17 @@ func TestProbeResultPersistsAcrossRestart(t *testing.T) {
 
 	dir := t.TempDir()
 	s := New(dir, srv.URL)
-	loggedIn, credits := s.HomeStatus()
-	if !loggedIn || credits != "1234" {
-		t.Fatalf("探测结果 = (%v, %q), want (true, 1234)", loggedIn, credits)
+	d := s.HomeStatus()
+	if !d.LoggedIn || d.Credits != "1234" {
+		t.Fatalf("探测结果 = %+v, want loggedIn 积分 1234", d)
 	}
 
 	// 模拟重启：新实例指向黑洞（网络不可用），CachedHomeStatus 应读到落盘值
 	blackhole := blackholeServer(t)
 	s2 := New(dir, blackhole.URL)
-	loggedIn, credits = s2.CachedHomeStatus()
-	if !loggedIn || credits != "1234" {
-		t.Fatalf("重启后回显 = (%v, %q), want (true, 1234)", loggedIn, credits)
+	d = s2.CachedHomeStatus()
+	if !d.LoggedIn || d.Credits != "1234" {
+		t.Fatalf("重启后回显 = %+v, want loggedIn 积分 1234", d)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "status.json")); err != nil {
 		t.Fatalf("status.json 未落盘: %v", err)
@@ -104,11 +104,11 @@ func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch {
 		case strings.Contains(r.URL.String(), "fx_checkin:list"):
-			// 签到列表页：无积分，但能提取 UID
-			_, _ = w.Write([]byte(`<html><head><title>签到</title></head><script>var discuz_uid = '9527';</script><body>签到列表</body></html>`))
+			// 签到列表页：无积分，但有连续/累计天数且能提取 UID
+			_, _ = w.Write([]byte(`<html><head><title>签到</title></head><script>var discuz_uid = '9527';</script><body>已连续签到12天，累计签到34天</body></html>`))
 		case strings.Contains(r.URL.Path, "space-uid-9527.html"):
-			// 个人空间页：统计信息块
-			_, _ = w.Write([]byte(`<html><head><title>个人空间</title></head><body><ul><li><em>积分</em> 888</li></ul></body></html>`))
+			// 个人空间页：统计信息块（等级/积分/金币）
+			_, _ = w.Write([]byte(`<html><head><title>个人空间</title></head><body><ul><li><em>积分</em> 888</li><li><em>金币</em> 10</li></ul><p><em>用户组: </em><a href="home.php?mod=spacecp&amp;ac=usergroup">Lv.8金别福禄娃</a></p></body></html>`))
 		case strings.Contains(r.URL.Path, "forum-2-1.html"):
 			_, _ = w.Write([]byte(`<html><body><a id="extcreditmenu">积分: 111</a></body></html>`))
 		default:
@@ -119,9 +119,12 @@ func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := New(t.TempDir(), srv.URL)
-	loggedIn, credits := s.HomeStatus()
-	if !loggedIn || credits != "888" {
-		t.Fatalf("空间页回退 = (%v, %q), want (true, 888)", loggedIn, credits)
+	d := s.HomeStatus()
+	if !d.LoggedIn || d.Credits != "888" {
+		t.Fatalf("空间页回退 = %+v, want loggedIn 积分 888", d)
+	}
+	if d.Coins != "10" || d.Group != "Lv.8金别福禄娃" || d.Streak != 12 || d.Total != 34 {
+		t.Fatalf("探测字段不全 = %+v, want 金币10 等级Lv.8 连续12 累计34", d)
 	}
 }
 

@@ -20,7 +20,11 @@ type status struct {
 	LastCheckinOK bool   `json:"last_checkin_ok"`
 	LastMsg       string `json:"last_msg"`
 	LoggedIn      bool   `json:"logged_in"`
+	Group         string `json:"group"`
 	Credits       string `json:"credits"`
+	Coins         string `json:"coins"`
+	Streak        int    `json:"streak"`
+	Total         int    `json:"total"`
 	ProbedAt      string `json:"probed_at"`
 }
 
@@ -62,13 +66,17 @@ func (s *Service) saveStatus(ok bool, msg string) {
 	s.writeStatus(st)
 }
 
-// saveProbe 记录一次首页探测结果（合并写入，不覆盖签到字段）。
-func (s *Service) saveProbe(loggedIn bool, credits string) {
+// saveProbe 记录一次状态探测结果（合并写入，不覆盖签到字段）。
+func (s *Service) saveProbe(d ProbeData) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	st := s.loadStatus()
-	st.LoggedIn = loggedIn
-	st.Credits = credits
+	st.LoggedIn = d.LoggedIn
+	st.Group = d.Group
+	st.Credits = d.Credits
+	st.Coins = d.Coins
+	st.Streak = d.Streak
+	st.Total = d.Total
 	st.ProbedAt = time.Now().Format("2006-01-02 15:04:05")
 	s.writeStatus(st)
 }

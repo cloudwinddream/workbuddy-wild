@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -35,19 +34,16 @@ func (s *Service) Checkin() (bool, string) {
 		return false, "签到请求失败: " + err.Error()
 	}
 	res := parseCheckinResult(text)
+	if res.OK && res.Gain != "" {
+		res.Msg += " · 本次积分+" + res.Gain
+	}
 	log.Printf("wnflb: 签到结果 ok=%v msg=%s", res.OK, res.Msg)
 	return res.OK, res.Msg
 }
 
 // Credits 查询当前积分。未登录返回 ""。
 func (s *Service) Credits() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	logged, html := s.checkLoggedIn()
-	if !logged {
-		return ""
-	}
-	return parseCredits(html)
+	return s.HomeStatus().Credits
 }
 
 // probeTimeout 状态探测的网络超时：论坛对某些 IP 响应很慢，
@@ -58,151 +54,106 @@ var probeTimeout = 20 * time.Second
 // probeStale 探测缓存过期阈值：超过后 Summary 触发后台刷新（不阻塞当次请求）。
 const probeStale = 2 * time.Minute
 
-// HomeStatus 实时探测：一次请求同时返回登录态与积分，并回写缓存与状态文件。
-// 只供签到后通知等后台场景；状态接口请用 CachedHomeStatus。
-//
-// 积分位置实测（用户账号 + 现成脚本印证）：论坛首页与积分页都不一定
-// 渲染积分；个人空间页（space-uid-{uid}.html）有"统计信息"块，
-// 形如 <em>积分</em>122。探测链：首页 → 个人空间页 → 积分页。
-func (s *Service) HomeStatus() (loggedIn bool, credits string) {
+// ProbeData 一次状态探测的结果（卡片展示与 Bark 推送共用）。
+type ProbeData struct {
+	LoggedIn bool
+	Group    string // 用户等级/用户组，如 Lv.8金别福禄娃
+	Credits  string // 积分
+	Coins    string // 金币
+	Streak   int    // 连续签到天数（0 = 未知）
+	Total    int    // 累计签到天数（0 = 未知）
+}
+
+// HomeStatus 实时探测：登录态 + 等级/积分/金币/连续·累计签到天数，
+// 并回写缓存与状态文件。只供签到后通知等后台场景；状态接口请用
+// CachedHomeStatus。采集顺序：论坛首页 → 签到列表页（天数/UID）→
+// 个人空间页（等级/金币），缺什么补什么。
+func (s *Service) HomeStatus() ProbeData {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	logged, html := s.checkLoggedInCtx(ctx)
 	if !logged {
-		s.storeProbe(false, "")
-		return false, ""
+		d := ProbeData{}
+		s.storeProbe(d)
+		return d
 	}
-	credits = parseCredits(html)
-	src := "首页"
-	if credits == "" {
-		// 候选页依次尝试（顺序与现成脚本一致：签到列表页提 UID →
-		// 个人空间页 → 个人资料页），版块页与积分页兜底。
-		type cand struct{ name, url string }
-		var cands []cand
-		uid := ""
-		if page, status, final, err := s.client.getDiag(ctx, s.checkinListURL(), nil); err == nil {
-			if c := parseCredits(page); c != "" {
-				credits, src = c, "签到列表页"
-			} else {
-				uid = extractUID(page)
-				log.Printf("wnflb: 积分探测：签到列表页 %d %s 未解析（uid=%q）", status, shortURL(final), uid)
-			}
-		} else {
-			log.Printf("wnflb: 积分探测：签到列表页抓取失败：%v", err)
-		}
-		if credits == "" {
-			if uid != "" {
-				cands = append(cands,
-					cand{"个人空间页", s.spaceURL(uid)},
-					cand{"个人资料页", s.profileURL(uid)})
-			}
-			if link := s.firstBoardLink(html); link != "" {
-				cands = append(cands, cand{"版块页", link})
-			}
-			cands = append(cands, cand{"积分页", s.creditURL()})
-			for _, cd := range cands {
-				page, status, final, err := s.client.getDiag(ctx, cd.url, nil)
-				if err != nil {
-					log.Printf("wnflb: 积分探测：%s抓取失败：%v", cd.name, err)
-					continue
-				}
-				if c := parseCredits(page); c != "" {
-					credits, src = c, cd.name
-					break
-				}
-				log.Printf("wnflb: 积分探测：%s %d %s 未解析（%d 字节，标题：%s）",
-					cd.name, status, shortURL(final), len(page), pageTitle(page))
-				if i := strings.Index(page, "积分"); i >= 0 {
-					lo := max(0, i-50)
-					hi := min(len(page), i+110)
-					snip := strings.ReplaceAll(page[lo:hi], "\n", " ")
-					log.Printf("wnflb: 积分探测：%s积分上下文：…%s…", cd.name, snip)
-				}
-			}
-		}
-	}
-	if credits == "" {
-		log.Printf("wnflb: 积分探测：所有候选页都未解析到积分")
+	d := ProbeData{LoggedIn: true}
+	d.Credits = parseCredits(html)
+	d.Group = parseUserGroup(html)
+	d.Coins = parseCoins(html)
+	uid := extractUID(html)
+	// 签到列表页：连续/累计签到天数（顺带补 UID 与积分）。
+	if page, err := s.client.getTextCtx(ctx, s.checkinListURL(), nil); err != nil {
+		log.Printf("wnflb: 积分探测：签到列表页抓取失败：%v", err)
 	} else {
-		log.Printf("wnflb: 积分探测（%s）当前积分 %s", src, credits)
-	}
-	s.storeProbe(true, credits)
-	return true, credits
-}
-
-// shortURL 只留路径部分打日志（避免整串 URL 刷屏）。
-func shortURL(u string) string {
-	if i := strings.Index(u, "://"); i >= 0 {
-		if j := strings.Index(u[i+3:], "/"); j >= 0 {
-			return u[i+3+j:]
+		d.Streak, d.Total = parseCheckinStats(page)
+		if d.Credits == "" {
+			d.Credits = parseCredits(page)
 		}
-		return u
+		if uid == "" {
+			uid = extractUID(page)
+		}
 	}
-	return u
+	// 个人空间页：等级/金币/积分的统计信息块。
+	if uid != "" && (d.Group == "" || d.Coins == "" || d.Credits == "") {
+		if page, err := s.client.getTextCtx(ctx, s.spaceURL(uid), nil); err != nil {
+			log.Printf("wnflb: 积分探测：个人空间页抓取失败：%v", err)
+		} else {
+			if d.Group == "" {
+				d.Group = parseUserGroup(page)
+			}
+			if d.Credits == "" {
+				d.Credits = parseCredits(page)
+			}
+			if d.Coins == "" {
+				d.Coins = parseCoins(page)
+			}
+		}
+	}
+	log.Printf("wnflb: 积分探测：积分=%q 金币=%q 等级=%q 连续=%d 累计=%d",
+		d.Credits, d.Coins, d.Group, d.Streak, d.Total)
+	s.storeProbe(d)
+	return d
 }
 
-// pageTitle 提取页面 <title>（诊断用，认出实际拿到的是什么页）。
-func pageTitle(html string) string {
-	if m := reTitle.FindStringSubmatch(html); m != nil {
-		return strings.TrimSpace(m[1])
-	}
-	return "(无标题)"
-}
-
-// firstBoardLink 从论坛首页提取第一个版块页链接（绝对地址）。
-// 版块页渲染带积分锚点的完整页眉，论坛首页则不一定。
-func (s *Service) firstBoardLink(html string) string {
-	if m := reBoardLink.FindStringSubmatch(html); m != nil {
-		return s.baseURL + "/" + m[1]
-	}
-	return ""
-}
-
-// checkinListURL 签到列表页地址（插件页，带完整页眉）。
+// checkinListURL 签到列表页地址（插件页，带签到天数统计）。
 func (s *Service) checkinListURL() string {
 	return s.baseURL + "/plugin.php?id=fx_checkin:list"
 }
 
-// spaceURL 个人空间页地址（统计信息块含积分）。
+// spaceURL 个人空间页地址（统计信息块含等级/积分/金币）。
 func (s *Service) spaceURL(uid string) string {
 	return s.baseURL + "/space-uid-" + uid + ".html"
 }
 
-// profileURL 个人资料页地址（同为积分候选页）。
-func (s *Service) profileURL(uid string) string {
-	return s.baseURL + "/home.php?mod=space&uid=" + uid + "&do=profile"
-}
-
-// creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。
-func (s *Service) creditURL() string {
-	return s.baseURL + "/home.php?mod=spacecp&ac=credit&showcredit=1"
-}
-
 // storeProbe 更新内存缓存并落盘探测结果。
-func (s *Service) storeProbe(loggedIn bool, credits string) {
+func (s *Service) storeProbe(d ProbeData) {
 	s.probeMu.Lock()
-	s.probeLoggedIn, s.probeCredits, s.probeAt = loggedIn, credits, time.Now()
+	s.probe, s.probeAt = d, time.Now()
 	s.probeMu.Unlock()
-	s.saveProbe(loggedIn, credits)
+	s.saveProbe(d)
 }
 
-// CachedHomeStatus 只读缓存的登录态与积分，绝不打网络（签到中心列表用）。
+// CachedHomeStatus 只读缓存的探测结果，绝不打网络（签到中心列表用）。
 // 缓存过期时后台异步刷新一次（单飞），当次仍立即返回旧值；
 // 冷启动先用 status.json 里上次落盘的探测结果顶上。
-func (s *Service) CachedHomeStatus() (loggedIn bool, credits string) {
+func (s *Service) CachedHomeStatus() ProbeData {
 	s.probeMu.Lock()
-	loggedIn, credits, at := s.probeLoggedIn, s.probeCredits, s.probeAt
+	d, at := s.probe, s.probeAt
 	s.probeMu.Unlock()
 	if at.IsZero() {
 		st := s.loadStatus()
-		loggedIn, credits = st.LoggedIn, st.Credits
+		d = ProbeData{
+			LoggedIn: st.LoggedIn, Group: st.Group, Credits: st.Credits,
+			Coins: st.Coins, Streak: st.Streak, Total: st.Total,
+		}
 	}
 	if time.Since(at) > probeStale {
 		s.refreshHomeStatusAsync()
 	}
-	return loggedIn, credits
+	return d
 }
 
 // refreshHomeStatusAsync 后台刷新探测缓存（同时只跑一个）。

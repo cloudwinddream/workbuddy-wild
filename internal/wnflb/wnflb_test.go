@@ -128,6 +128,22 @@ func TestParseCredits(t *testing.T) {
 	if got := parseCredits(space); got != "456" {
 		t.Errorf("空间页布局 parseCredits = %q, want 456", got)
 	}
+	if got := parseCoins(space); got != "7" {
+		t.Errorf("parseCoins = %q, want 7", got)
+	}
+	// 用户等级
+	if got := parseUserGroup(`<p><em>用户组: </em><a href="x">Lv.8金别福禄娃</a></p>`); got != "Lv.8金别福禄娃" {
+		t.Errorf("parseUserGroup = %q", got)
+	}
+	// 连续/累计签到天数
+	if s, tt := parseCheckinStats(`已连续签到91天，累计签到828天`); s != 91 || tt != 828 {
+		t.Errorf("parseCheckinStats = (%d, %d), want (91, 828)", s, tt)
+	}
+	// 本次签到获得积分
+	res := parseCheckinResult(`<?xml version="1.0"?><root><![CDATA[签到成功，恭喜你获得5积分]]></root>`)
+	if !res.OK || res.Gain != "5" {
+		t.Errorf("parseCheckinResult gain = %+v", res)
+	}
 }
 
 func TestDetectCaptcha(t *testing.T) {

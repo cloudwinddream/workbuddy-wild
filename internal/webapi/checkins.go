@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -35,11 +36,11 @@ func (m *wnflbModule) times() []string {
 func (m *wnflbModule) Summary() checkin.Summary {
 	username, hasAccount := m.svc.QuickStatus()
 	st := m.svc.LoadStatusForAPI()
-	loggedIn, points := false, ""
+	var d wnflb.ProbeData
 	if hasAccount {
 		// 只读缓存，绝不在列表请求里实时打论坛（论坛慢时会拖死整个页面）；
 		// 缓存过期由服务层后台异步刷新，页面自动刷新周期内即可看到新值。
-		loggedIn, points = m.svc.CachedHomeStatus()
+		d = m.svc.CachedHomeStatus()
 	}
 	times := m.times()
 	next := checkin.NextRun(times, time.Now())
@@ -47,15 +48,30 @@ func (m *wnflbModule) Summary() checkin.Summary {
 	if !next.IsZero() {
 		nextStr = next.Format("2006-01-02 15:04")
 	}
+	// 附加信息行：等级 · 金币 · 连续/累计签到天数（有啥显示啥）。
+	var parts []string
+	if d.Group != "" {
+		parts = append(parts, d.Group)
+	}
+	if d.Coins != "" {
+		parts = append(parts, "金币 "+d.Coins)
+	}
+	if d.Streak > 0 {
+		parts = append(parts, fmt.Sprintf("连续签到 %d 天", d.Streak))
+	}
+	if d.Total > 0 {
+		parts = append(parts, fmt.Sprintf("累计 %d 天", d.Total))
+	}
 	return checkin.Summary{
 		ID:         "wnflb",
 		Name:       "福利吧",
 		Desc:       "福利吧论坛（wnflb2023.com）每日签到",
 		Configured: hasAccount,
-		LoggedIn:   loggedIn,
+		LoggedIn:   d.LoggedIn,
 		Username:   username,
-		Points:     points,
+		Points:     d.Credits,
 		PointsName: "积分",
+		Detail:     strings.Join(parts, " · "),
 		LastOK:     st.LastCheckinOK,
 		LastMsg:    st.LastMsg,
 		LastAt:     st.LastCheckinAt,

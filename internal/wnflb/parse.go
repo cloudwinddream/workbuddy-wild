@@ -2,6 +2,7 @@ package wnflb
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -125,9 +126,12 @@ func extractCheckinFormhash(html string) (a, b string) {
 
 // checkinResult 签到结果。
 type checkinResult struct {
-	OK  bool
-	Msg string
+	OK   bool
+	Msg  string
+	Gain string // 本次签到获得的积分（解析不到为 ""）
 }
+
+var reGain = regexp.MustCompile(`获得\s*(\d+)\s*积分`)
 
 // parseCheckinResult 解析签到接口返回（CDATA 包裹的 HTML）。
 func parseCheckinResult(text string) checkinResult {
@@ -137,19 +141,23 @@ func parseCheckinResult(text string) checkinResult {
 	}
 	clean := reSpaces.ReplaceAllString(stripTags(content), " ")
 	clean = strings.TrimSpace(clean)
+	gain := ""
+	if m := reGain.FindStringSubmatch(clean); m != nil {
+		gain = m[1]
+	}
 
 	switch {
 	case strings.Contains(clean, "签到成功"):
 		if m := reRank.FindStringSubmatch(clean); m != nil {
-			return checkinResult{true, "签到成功！今日第 " + m[1] + " 个签到"}
+			return checkinResult{true, "签到成功！今日第 " + m[1] + " 个签到", gain}
 		}
-		return checkinResult{true, "签到成功！"}
+		return checkinResult{true, "签到成功！", gain}
 	case strings.Contains(clean, "已经签到") || strings.Contains(clean, "已签到"):
-		return checkinResult{true, "今日已签到（重复签到）"}
+		return checkinResult{true, "今日已签到（重复签到）", gain}
 	case strings.Contains(clean, "先登录") || strings.Contains(clean, "请登录"):
-		return checkinResult{false, "登录已过期，请重新登录"}
+		return checkinResult{false, "登录已过期，请重新登录", ""}
 	case strings.Contains(clean, "补签") && strings.Contains(clean, "成功"):
-		return checkinResult{true, "补签成功"}
+		return checkinResult{true, "补签成功", gain}
 	}
 	if len(clean) > 200 {
 		clean = clean[:200]
@@ -157,7 +165,7 @@ func parseCheckinResult(text string) checkinResult {
 	if clean == "" {
 		clean = "空响应"
 	}
-	return checkinResult{false, "未知响应: " + clean}
+	return checkinResult{false, "未知响应: " + clean, gain}
 }
 
 var reCredits = []*regexp.Regexp{
@@ -193,4 +201,56 @@ func parseCredits(html string) string {
 		}
 	}
 	return ""
+}
+
+var reCoins = []*regexp.Regexp{
+	regexp.MustCompile(`_金币_\s*([\d,]+)`),
+	regexp.MustCompile(`金币\s*[：:]\s*([\d,]+)`),
+	regexp.MustCompile(`金币\s*[：:]?\s*</[^>]+>\s*([\d,]+)`),
+	regexp.MustCompile(`>金币\s*([\d,]+)<`),
+}
+
+// parseCoins 解析当前金币，解析不到返回 ""。
+func parseCoins(html string) string {
+	for _, re := range reCoins {
+		if m := re.FindStringSubmatch(html); m != nil {
+			return strings.ReplaceAll(m[1], ",", "")
+		}
+	}
+	return ""
+}
+
+var reUserGroup = []*regexp.Regexp{
+	// <em>用户组: </em><a href="...">Lv.8金别福禄娃</a>
+	regexp.MustCompile(`用户组\s*[：:]?\s*</[^>]+>\s*<a[^>]*>([^<]+)</a>`),
+	regexp.MustCompile(`_用户组_\s*([^<\s]+)`),
+	regexp.MustCompile(`用户组\s*[：:]\s*([^<\s，,；;]+)`),
+}
+
+// parseUserGroup 解析用户等级/用户组，解析不到返回 ""。
+func parseUserGroup(html string) string {
+	for _, re := range reUserGroup {
+		if m := re.FindStringSubmatch(html); m != nil {
+			if g := strings.TrimSpace(m[1]); g != "" {
+				return g
+			}
+		}
+	}
+	return ""
+}
+
+var (
+	reStreak = regexp.MustCompile(`连续签到\s*(\d+)\s*天`)
+	reTotal  = regexp.MustCompile(`累计签到\s*(\d+)\s*天`)
+)
+
+// parseCheckinStats 从签到列表页解析连续/累计签到天数（解析不到为 0）。
+func parseCheckinStats(html string) (streak, total int) {
+	if m := reStreak.FindStringSubmatch(html); m != nil {
+		streak, _ = strconv.Atoi(m[1])
+	}
+	if m := reTotal.FindStringSubmatch(html); m != nil {
+		total, _ = strconv.Atoi(m[1])
+	}
+	return streak, total
 }
