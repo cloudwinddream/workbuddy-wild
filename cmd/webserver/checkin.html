@@ -3,94 +3,368 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>签到中心</title>
+<title>WorkBuddy-Wild · 签到中心</title>
 <style>
-  * { box-sizing: border-box; }
-  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-         margin: 0; padding: 20px; background: #f5f6f8; color: #222; }
-  .wrap { max-width: 640px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
-  .sub a { color: #1677ff; text-decoration: none; }
-  .card { background: #fff; border-radius: 10px; padding: 16px 18px;
-          margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-  .card h2 { font-size: 16px; margin: 0 0 2px; }
-  .card .desc { font-size: 12px; color: #999; margin-bottom: 8px; }
-  .row { display: flex; justify-content: space-between; padding: 7px 0;
-         border-bottom: 1px solid #f0f0f0; font-size: 14px; }
-  .row:last-child { border-bottom: none; }
-  .k { color: #888; }
-  .v { font-weight: 500; text-align: right; max-width: 65%; }
-  .ok { color: #189225; } .bad { color: #d4380d; } .muted { color: #aaa; }
-  input[type=text], input[type=password] {
-    width: 100%; padding: 9px 10px; margin: 6px 0; font-size: 14px;
-    border: 1px solid #d9d9d9; border-radius: 6px; }
-  button { padding: 9px 18px; font-size: 14px; border: none; border-radius: 6px;
-           background: #1677ff; color: #fff; cursor: pointer; margin: 6px 8px 6px 0; }
-  button:disabled { background: #bcd6ff; cursor: default; }
-  button.ghost { background: #f0f0f0; color: #333; }
-  .captchaBox { display: none; }
-  .captchaImg { display: block; margin: 8px 0; border: 1px solid #eee;
-                border-radius: 6px; cursor: pointer; }
-  .msg { min-height: 20px; font-size: 13px; margin-top: 6px; }
-  .loginForm { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #eee; }
-  #keyOverlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45);
-                align-items: center; justify-content: center; z-index: 50; }
-  #keyOverlay .card { width: 320px; }
-  .empty { text-align: center; color: #aaa; padding: 30px 0; font-size: 14px; }
+/* WorkBuddy-Wild 统一签到控制台
+   设计语言沿用原桌面版首页（双栏：左签到 / 右设置），字体整体放大。 */
+:root {
+  --bg: #f5f5f7;
+  --card: #ffffff;
+  --border: #e3e3e8;
+  --fg: #1d1d20;
+  --muted: #787882;
+  --accent: #3b82f6;
+  --accent2: #2563eb;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --radius: 10px;
+  --mono: Consolas, "Courier New", monospace;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  --live: #16a34a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e22; --card: #2a2a30; --border: #3a3a42;
+    --fg: #e8e8ec; --muted: #9a9aa4;
+    --accent: #4a8cf7; --accent2: #3b82f6;
+    --ok: #34d399; --warn: #fbbf24; --err: #f87171; --live: #34d399;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+input, select, button, textarea { font: inherit; color: inherit; }
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.ok { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
+.msg { min-height: 22px; font-size: 14px; margin-top: 6px; }
+
+#app { max-width: 1280px; margin: 0 auto; padding: 14px 16px 28px; display: flex; flex-direction: column; gap: 12px; }
+
+/* 头部 */
+.header { display: flex; align-items: center; gap: 12px; padding: 2px 2px 12px; border-bottom: 1px solid var(--border); }
+.logo-mark {
+  width: 40px; height: 40px; border-radius: 10px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(145deg, var(--accent2), #0d9488); color: #fff;
+  font-size: 17px; font-weight: 800; letter-spacing: -1px;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, .22);
+}
+.head-info { flex: 1; min-width: 0; }
+.title { font-size: 21px; font-weight: 700; line-height: 1.25; }
+.title .ver { color: var(--muted); font-size: 14px; font-weight: 400; margin-left: 6px; }
+.sub { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.head-status { display: flex; align-items: center; gap: 7px; font-size: 13.5px; color: var(--muted); flex: none; }
+.dot-live { width: 9px; height: 9px; border-radius: 50%; background: var(--live); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* 双栏主体：左签到 / 右设置 */
+.body { display: flex; gap: 14px; align-items: flex-start; }
+.col-left {
+  flex: 1.55; min-width: 0;
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.col-right { flex: 1; min-width: 0; max-width: 400px; display: flex; flex-direction: column; gap: 12px; }
+@media (max-width: 920px) {
+  .body { flex-direction: column; }
+  .col-left, .col-right { width: 100%; max-width: none; }
+}
+
+/* 区块 */
+.section {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0 8px; font-size: 14px; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
+.col-left .section-head:first-of-type { margin-top: 2px; }
+.section .section-head { margin-top: 0; }
+.hint { font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.row.between { justify-content: space-between; }
+
+/* 按钮 */
+.btn {
+  background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 15px; white-space: nowrap;
+}
+.btn:hover { background: rgba(127, 127, 140, 0.1); }
+.btn.primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+.btn.primary:hover { background: var(--accent); }
+.btn.primary.alt { background: #0d9488; border-color: #0d9488; }
+.btn.primary.alt:hover { background: #0f766e; }
+.btn.go { background: var(--ok); border-color: var(--ok); color: #fff; }
+.btn.go:hover { filter: brightness(1.08); background: var(--ok); }
+.btn.danger { color: var(--err); border-color: #f0c9c9; }
+.btn.danger:hover { background: #fdeeee; }
+.btn.small { padding: 5px 12px; font-size: 13.5px; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+/* 输入框 */
+.input, .select, textarea.input {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 12px; font-size: 15px; color: var(--fg); outline: none; width: 100%;
+}
+.input:focus, .select:focus, textarea.input:focus { border-color: var(--accent); }
+label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 10px 0 4px; }
+
+/* 总积分横幅 */
+.total-bar {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 10px 14px; margin-bottom: 8px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(13, 148, 136, 0.08));
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.total-label { font-size: 14px; color: var(--muted); flex: none; }
+.total-val { font-size: 32px; font-weight: 700; line-height: 1.1; font-family: var(--mono); color: var(--accent2); flex: none; }
+.total-sub { flex: 1; min-width: 0; text-align: right; font-size: 13.5px; }
+
+/* 分平台积分条 */
+.split-bar { display: flex; gap: 10px; margin-bottom: 6px; }
+.split-item {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(127, 127, 140, 0.04);
+}
+.split-icon { flex: none; width: 20px; height: 20px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; line-height: 1; align-self: center; }
+.split-item .icon-wb { background: #e0edff; color: #2563eb; }
+.split-item .icon-trae { background: #ccfbf1; color: #0f766e; }
+.split-name { font-size: 13.5px; color: var(--muted); flex: none; }
+.split-val { font-size: 19px; font-weight: 700; font-family: var(--mono); margin-left: auto; flex: none; }
+.split-cnt { font-size: 12px; flex: none; }
+.split-item.empty { opacity: 0.45; }
+@media (prefers-color-scheme: dark) {
+  .split-item .icon-wb { background: #1e3a5f; color: #8ab4f8; }
+  .split-item .icon-trae { background: #134e4a; color: #5eead4; }
+}
+
+/* 账号 / 模块卡片 */
+.acct-list { display: flex; flex-direction: column; gap: 8px; }
+.acct { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; position: relative; }
+.acct-row1 { display: flex; align-items: center; gap: 10px; }
+.acct-icon { width: 30px; height: 30px; border-radius: 8px; flex: none; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; }
+.acct-icon.icon-wb { background: var(--accent2); }
+.acct-icon.icon-trae { background: #0d9488; }
+.acct-icon.icon-wnflb { background: #d97706; }
+.acct-icon.icon-smzdm { background: #dc2626; }
+.acct-name { font-weight: 700; font-size: 17.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.acct-name .uname { font-weight: 400; font-size: 13.5px; color: var(--muted); margin-left: 6px; }
+.acct-credits { font-size: 20px; font-weight: 700; font-family: var(--mono); color: var(--ok); flex: none; }
+.acct-credits .unit { font-size: 12.5px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+.acct-row2 { display: flex; align-items: center; gap: 8px; margin-top: 5px; flex-wrap: wrap; }
+.acct-status { font-size: 14px; color: var(--muted); flex: 1; min-width: 200px; }
+.acct-status.ok { color: var(--ok); }
+.acct-status.err { color: var(--err); }
+.acct-actions { display: flex; gap: 8px; flex: none; }
+.acct-row3 { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.bark-line { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+.bark-line .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bark-edit { margin-top: 8px; }
+.acct-actions-all { display: flex; gap: 10px; margin-top: 12px; }
+.acct-actions-all .btn { flex: 1; padding: 11px 16px; font-size: 16px; }
+.empty { color: var(--muted); font-size: 14.5px; text-align: center; padding: 18px 0; border: 1px dashed var(--border); border-radius: 10px; }
+.badge { flex: none; font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 1px 9px; }
+.badge.b-ok { background: rgba(22, 163, 74, .12); color: var(--ok); }
+.badge.b-err { background: rgba(220, 38, 38, .1); color: var(--err); }
+.badge.b-mut { background: rgba(127, 127, 140, .12); color: var(--muted); }
+
+/* 登录/ Cookie 表单 */
+.subform { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.subform .f-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.captchaImg { display: block; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; max-width: 100%; }
+
+/* 时间 chips（沿用原版 hour-chip） */
+.hours { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.hour-chip { display: flex; align-items: center; gap: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 3px 4px; }
+.hour-chip input { width: 76px; background: transparent; border: none; color: var(--fg); font-size: 15px; }
+.hour-chip .del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; padding: 0 5px; }
+.hour-chip .del:hover { color: var(--err); }
+
+/* 覆盖层 */
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: flex; align-items: center; justify-content: center; z-index: 30; padding: 16px; }
+.modal { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 460px; padding: 18px; box-shadow: var(--shadow); }
+.modal-title { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+.modal-body { font-size: 14.5px; word-break: break-all; white-space: pre-wrap; line-height: 1.6; }
+.modal-body a { color: var(--accent2); }
+.countdown { margin-top: 8px; color: var(--muted); font-size: 13.5px; font-family: var(--mono); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+/* toast */
+.toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  background: #2a2a30; color: #f2f2f4; border-radius: 8px;
+  padding: 10px 18px; font-size: 15px; z-index: 40; max-width: 88%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-shadow: var(--shadow);
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #c9c9d0; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>签到中心</h1>
-  <div class="sub"><a href="/">← 返回主管理页</a> · 所有自动签到项统一在这里管理</div>
-  <div class="card" id="notifyCard">
-    <h2>通知设置（Bark 推送）</h2>
-    <div class="desc">签到成功/失败后推送通知；每个签到账号可单独指定设备，留空则用默认设备</div>
-    <div style="font-size:13px;color:#888">Bark 服务器</div>
-    <input type="text" id="barkServer" placeholder="https://api.day.app">
-    <div style="font-size:13px;color:#888">默认设备 Key（<span id="barkDefaultState">未设置</span>，输入新值可替换）</div>
-    <input type="password" id="barkDefaultKey" placeholder="留空 = 不修改" autocomplete="off">
-    <div>
-      <button id="btnSaveNotify">保存设置</button>
-      <button id="btnTestNotify" class="ghost">发送测试（默认设备）</button>
-      <button id="btnClearDefault" class="ghost">清除默认</button>
+<div id="app">
+
+  <!-- 头部 -->
+  <div class="header">
+    <div class="logo-mark">WB</div>
+    <div class="head-info">
+      <div class="title">WorkBuddy-Wild<span class="ver">签到中心</span></div>
+      <div class="sub">WorkBuddy · TraeWork · 福利吧 · 什么值得买，所有签到统一管理</div>
     </div>
-    <div class="msg" id="notifyMsg"></div>
+    <div class="head-status"><span class="dot-live"></span><span id="headStatus">已连接</span></div>
   </div>
-  <div class="card" id="settingsCard">
-    <h2>统一签到设置（WorkBuddy / TraeWork）</h2>
-    <div class="desc">两个平台共用一套签到时间；修改后即时生效，无需重启</div>
-    <div style="font-size:13px;color:#888">每日签到时间（逗号分隔，如 08:30,20:30）</div>
-    <input type="text" id="checkinTimes" placeholder="09:00">
-    <div>
-      <button id="btnSaveTimes">保存签到时间</button>
+
+  <!-- 双栏主体：左签到 / 右设置 -->
+  <div class="body">
+
+    <!-- 左栏：全部签到内容 -->
+    <div class="col-left">
+      <div class="total-bar">
+        <span class="total-label">总积分</span>
+        <span class="total-val" id="totalCredits">—</span>
+        <span class="total-sub muted" id="nextFireText"></span>
+      </div>
+      <div class="split-bar">
+        <div class="split-item" id="splitWB">
+          <span class="split-icon icon-wb">W</span>
+          <span class="split-name">WorkBuddy</span>
+          <span class="split-val" id="wbCredits">—</span>
+          <span class="split-cnt muted" id="wbCount"></span>
+        </div>
+        <div class="split-item" id="splitTW">
+          <span class="split-icon icon-trae">T</span>
+          <span class="split-name">TraeWork</span>
+          <span class="split-val" id="traeCredits">—</span>
+          <span class="split-cnt muted" id="traeCount"></span>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <span>WorkBuddy 账号 <span id="wbCountText" class="muted"></span></span>
+        <button class="btn primary small" id="btnAddWB">＋ 添加账号</button>
+      </div>
+      <div id="wbList" class="acct-list"></div>
+
+      <div class="section-head">
+        <span>TraeWork 账号 <span id="twCountText" class="muted"></span></span>
+        <button class="btn primary alt small" id="btnAddTrae">＋ 添加账号</button>
+      </div>
+      <div id="twList" class="acct-list"></div>
+
+      <div class="section-head"><span>第三方签到</span></div>
+      <div id="modList" class="acct-list"></div>
+
+      <div class="acct-actions-all">
+        <button class="btn go" id="btnCheckinAll">全部签到</button>
+        <button class="btn" id="btnRefreshAll">全部刷新积分</button>
+      </div>
+      <div class="msg" id="globalMsg"></div>
     </div>
-    <div id="settingsInfo" style="font-size:13px;color:#888;margin-top:6px"></div>
-    <div class="msg" id="settingsMsg"></div>
+
+    <!-- 右栏：设置 -->
+    <div class="col-right">
+
+      <!-- 推送设置（Bark） -->
+      <div class="section" id="notifySection">
+        <div class="section-head"><span>推送设置 · Bark</span></div>
+        <div class="hint">签到成功 / 失败后统一推送到默认设备；个别账号想推到别的手机时，在账号卡片里单独设置即可。</div>
+        <label class="f-label">Bark 服务器</label>
+        <input class="input" type="text" id="barkServer" placeholder="https://api.day.app">
+        <label class="f-label">默认设备 Key（<span id="barkDefaultState">未设置</span>，输入新值可替换）</label>
+        <input class="input" type="password" id="barkDefaultKey" placeholder="留空 = 不修改" autocomplete="off">
+        <div class="row" style="margin-top:10px">
+          <button class="btn primary" id="btnSaveNotify">保存设置</button>
+          <button class="btn" id="btnTestNotify">发送测试</button>
+          <button class="btn danger" id="btnClearDefault">清除默认</button>
+        </div>
+        <div class="msg" id="notifyMsg"></div>
+      </div>
+
+      <!-- 签到设置 -->
+      <div class="section" id="settingsSection">
+        <div class="section-head"><span>签到设置</span></div>
+        <label class="f-label">每天签到时间（WorkBuddy / TraeWork 共用，改完即时生效）</label>
+        <div class="row wrap" style="align-items:flex-start">
+          <div id="hoursBox" class="hours"></div>
+          <button class="btn small" id="btnAddHour" title="增加一个时间">＋ 时间</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" id="btnSaveTimes">保存签到时间</button>
+        </div>
+        <div class="hint" id="settingsInfo"></div>
+        <div class="msg" id="settingsMsg"></div>
+      </div>
+
+      <div class="section">
+        <div class="hint" style="margin-top:0">
+          说明：福利吧 / 什么值得买的签到时间在各自模块内固定（福利吧 01:00、22:00，什么值得买 09:00）。
+          积分与登录状态为缓存值，后台自动刷新。旧版完整管理面板仍可通过
+          <a href="/legacy/" style="color:var(--accent2)">/legacy/</a> 打开（积分策略、API 监听在那边）。
+        </div>
+      </div>
+
+    </div>
   </div>
-  <h2 style="font-size:16px;margin:18px 0 8px">WorkBuddy 账号</h2>
-  <div id="wbAccounts"></div>
-  <h2 style="font-size:16px;margin:18px 0 8px">TraeWork 账号</h2>
-  <div id="twAccounts"></div>
-  <h2 style="font-size:16px;margin:18px 0 8px">第三方签到</h2>
-  <div id="modules"></div>
-  <div id="globalMsg" class="msg"></div>
 </div>
 
-<div id="keyOverlay">
-  <div class="card">
-    <div style="font-weight:600;margin-bottom:8px">输入管理页 API Key</div>
-    <input type="password" id="apiKeyInput" placeholder="WB2A_API_KEY 的值">
-    <div><button id="btnKey">确定</button></div>
+<!-- 添加账号（登录）覆盖层 -->
+<div class="overlay hidden" id="loginOverlay">
+  <div class="modal">
+    <div class="modal-title" id="loginTitle">添加账号</div>
+    <div class="modal-body">
+      <div id="loginMsg">正在发起登录…</div>
+      <div style="margin-top:10px"><a id="loginUrl" href="#" target="_blank" rel="noopener" class="hidden">打开授权链接</a></div>
+      <div class="countdown" id="loginStatus"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnOpenUrl">打开授权链接</button>
+      <button class="btn small" id="btnCopyUrl">复制链接</button>
+      <button class="btn small danger" id="btnCancelLogin">取消</button>
+    </div>
   </div>
 </div>
+
+<!-- 通用确认弹层 -->
+<div class="overlay hidden" id="confirmOverlay">
+  <div class="modal">
+    <div class="modal-title" id="confirmTitle">确认</div>
+    <div class="modal-body" id="confirmMsg">确定执行该操作？</div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnConfirmCancel">取消</button>
+      <button class="btn small danger" id="btnConfirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- API Key 输入层 -->
+<div class="overlay hidden" id="keyOverlay">
+  <div class="modal">
+    <div class="modal-title">输入管理页 API Key</div>
+    <div class="modal-body">服务器开启了 API Key 鉴权（WB2A_API_KEY），请输入后再继续。</div>
+    <input class="input" type="password" id="apiKeyInput" placeholder="WB2A_API_KEY 的值" style="margin-top:10px">
+    <div class="modal-actions">
+      <button class="btn small primary" id="btnKey">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
 
 <script>
 (function () {
   "use strict";
-  var LS_KEY = "wbw_api_key"; // 与主管理页共用
+  var LS_KEY = "wbw_api_key"; // 与旧管理页共用
   var captchaId = "", captchaUser = "", captchaPass = "";
+  var loginState = "", loginTimer = null, loginPlatform = "";
+  var moduleBark = {}; // 模块 id -> {set, key}（来自 /api/notify/config）
+  var confirmCb = null;
 
   function $(id) { return document.getElementById(id); }
   function key() { try { return sessionStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; } }
@@ -99,6 +373,7 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+  function msgOf(r, fallback) { return (r && (r.msg || r.error)) || fallback || ""; }
 
   async function api(method, path, body) {
     var headers = {};
@@ -109,338 +384,102 @@
       method: method, headers: headers,
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-    if (r.status === 401) { $("keyOverlay").style.display = "flex"; throw new Error("401"); }
-    return r.json();
+    if (r.status === 401) { $("keyOverlay").classList.remove("hidden"); throw new Error("401"); }
+    var data = null;
+    try { data = await r.json(); } catch (e) { data = null; }
+    if (!r.ok && data && !data.msg && !data.error) data = { ok: false, msg: "HTTP " + r.status };
+    return data || {};
   }
 
+  var toastTimer = null;
+  function toast(t) {
+    var el = $("toast");
+    el.textContent = t;
+    el.classList.remove("hidden");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.add("hidden"); }, 3200);
+  }
   function say(t, ok) {
     var m = $("globalMsg");
-    m.textContent = t;
-    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+    m.textContent = t || "";
+    m.style.color = ok === true ? "var(--ok)" : (ok === false ? "var(--err)" : "var(--muted)");
   }
-
-  function statusBadge(m) {
-    if (!m.configured) return '<span class="muted">未配置</span>';
-    if (!m.logged_in) return '<span class="bad">登录已过期</span>';
-    return '<span class="ok">正常' + (m.username ? '（' + esc(m.username) + '）' : '') + '</span>';
-  }
-
-  function render(mods) {
-    var box = $("modules");
-    if (!mods || !mods.length) {
-      box.innerHTML = '<div class="card empty">暂无签到模块</div>';
-      return;
-    }
-    box.innerHTML = mods.map(function (m) {
-      var h = '<div class="card" data-mid="' + esc(m.id) + '">';
-      h += '<h2>' + esc(m.name) + '</h2><div class="desc">' + esc(m.desc || "") + '</div>';
-      h += '<div class="row"><span class="k">状态</span><span class="v">' + statusBadge(m) + '</span></div>';
-      h += '<div class="row"><span class="k">' + esc(m.points_name || "积分") + '</span>' +
-           '<span class="v">' + (m.points ? esc(m.points) : "—") + '</span></div>';
-      h += '<div class="row"><span class="k">上次签到</span><span class="v">' +
-           (m.last_at ? esc(m.last_at) + ' · ' + (m.last_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
-            (m.last_msg ? ' ' + esc(m.last_msg) : '') : "—") + '</span></div>';
-      h += '<div class="row"><span class="k">下次签到</span><span class="v">' +
-           esc(m.next_at || "—") + (m.times ? '（' + esc(m.times) + '）' : '') + '</span></div>';
-      h += '<div style="margin-top:8px"><button data-act="run" data-mid="' + esc(m.id) + '">立即签到</button>';
-      if (m.id === "wnflb" && m.logged_in) {
-        h += '<button data-act="logout" class="ghost">退出登录</button>';
-      }
-      if (m.id === "smzdm" && m.logged_in) {
-        h += '<button data-act="smzdm-logout" class="ghost">清除 Cookie</button>';
-      }
-      h += '</div>';
-      // 福利吧登录表单（未登录时展开）
-      if (m.id === "wnflb" && !m.logged_in) {
-        h += '<div class="loginForm"><div style="font-weight:600;margin-bottom:4px">账号登录</div>' +
-          '<input type="text" id="wnflbUser" placeholder="论坛账号" autocomplete="username">' +
-          '<input type="password" id="wnflbPass" placeholder="论坛密码" autocomplete="current-password">' +
-          '<div><button data-act="login">登录</button></div>' +
-          '<div class="captchaBox" id="wnflbCaptchaBox">' +
-          '<div style="font-size:13px;color:#888">本次登录需要验证码（点击图片可换一张）：</div>' +
-          '<img class="captchaImg" id="wnflbCaptchaImg" alt="验证码">' +
-          '<input type="text" id="wnflbCaptchaCode" placeholder="输入验证码" autocomplete="off">' +
-          '<div><button data-act="captcha">提交验证码</button></div></div></div>';
-      }
-      // 什么值得买 Cookie 表单（未配置时展开）
-      if (m.id === "smzdm" && !m.logged_in) {
-        h += '<div class="loginForm"><div style="font-weight:600;margin-bottom:4px">Cookie 配置</div>' +
-          '<div style="font-size:12px;color:#888;margin-bottom:4px">从什么值得买 APP 抓包获取完整 Cookie（须包含 sess 字段），粘贴到下方：</div>' +
-          '<textarea id="smzdmCookie" rows="3" style="width:100%;padding:9px 10px;font-size:12px;' +
-          'border:1px solid #d9d9d9;border-radius:6px;font-family:monospace" ' +
-          'placeholder="sess=...; smzdm_id=...; device_id=...; ..."></textarea>' +
-          '<div><button data-act="smzdm-save">保存 Cookie</button></div></div>';
-      }
-      // Bark 设备覆盖（每个账号可单独指定设备，留空用默认）
-      h += '<div class="loginForm"><div style="font-size:13px;color:#888">Bark 设备 Key（可选，留空用默认设备；当前：' +
-        '<span data-bark-state="' + esc(m.id) + '">加载中</span>）</div>' +
-        '<input type="password" data-bark-key="' + esc(m.id) + '" placeholder="留空 = 不修改" autocomplete="off">' +
-        '<div><button data-act="bark-save" class="ghost">保存 Bark 设置</button>' +
-        '<button data-act="bark-test" class="ghost">测试此设备</button>' +
-        '<button data-act="bark-clear" class="ghost">清除</button></div></div>';
-      h += '<div class="msg" data-msg="' + esc(m.id) + '"></div>';
-      h += '</div>';
-      return h;
-    }).join("");
-
-    box.querySelectorAll("button").forEach(function (btn) {
-      btn.onclick = function () { onAction(btn.getAttribute("data-act"), btn); };
-    });
-    var ci = $("wnflbCaptchaImg");
-    if (ci) ci.onclick = loadCaptcha;
-  }
-
-  function modMsg(mid, t, ok) {
-    var el = document.querySelector('[data-msg="' + mid + '"]');
-    if (el) {
-      el.textContent = t;
-      el.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
-    }
-  }
-
-  async function onAction(act, btn) {
-    if (act === "bark-save" || act === "bark-clear" || act === "bark-test") {
-      barkAction(act, btn);
-      return;
-    }
-    var card = btn.closest(".card");
-    var mid = card.getAttribute("data-mid");
-    if (act === "run") {
-      btn.disabled = true;
-      modMsg(mid, "签到中…");
-      try {
-        var r = await api("POST", "/api/checkins/" + encodeURIComponent(mid) + "/run");
-        modMsg(mid, r.msg || (r.ok ? "完成" : "失败"), r.ok);
-      } catch (e) { if (e.message !== "401") modMsg(mid, "请求失败：" + e.message, false); }
-      btn.disabled = false;
-      refresh();
-    } else if (act === "login") {
-      var u = $("wnflbUser").value.trim(), p = $("wnflbPass").value;
-      if (!u || !p) { modMsg(mid, "请输入账号和密码", false); return; }
-      modMsg(mid, "登录中…");
-      try {
-        var r2 = await api("POST", "/api/wnflb/login", { username: u, password: p });
-        if (r2.ok) { modMsg(mid, "登录成功", true); captchaId = ""; refresh(); return; }
-        if (r2.need_captcha) {
-          captchaId = r2.captcha_id; captchaUser = u; captchaPass = p;
-          $("wnflbCaptchaBox").style.display = "block";
-          loadCaptcha();
-          modMsg(mid, "本次登录需要验证码，请识别并提交", false);
-          return;
-        }
-        modMsg(mid, r2.msg || "登录失败", false);
-      } catch (e) { if (e.message !== "401") modMsg(mid, "登录请求失败：" + e.message, false); }
-    } else if (act === "captcha") {
-      var code = $("wnflbCaptchaCode").value.trim();
-      if (!code) { modMsg(mid, "请输入验证码", false); return; }
-      modMsg(mid, "提交中…");
-      try {
-        var r3 = await api("POST", "/api/wnflb/captcha",
-          { id: captchaId, code: code, username: captchaUser, password: captchaPass });
-        if (r3.ok) { modMsg(mid, "登录成功", true); captchaId = ""; refresh(); return; }
-        if (r3.need_retry) {
-          captchaId = r3.captcha_id;
-          $("wnflbCaptchaCode").value = "";
-          loadCaptcha();
-          modMsg(mid, r3.msg || "验证码不正确，已换一张", false);
-          return;
-        }
-        modMsg(mid, r3.msg || "登录失败", false);
-      } catch (e) { if (e.message !== "401") modMsg(mid, "提交失败：" + e.message, false); }
-    } else if (act === "logout") {
-      try {
-        await api("POST", "/api/wnflb/logout");
-        modMsg(mid, "已退出登录", true);
-        refresh();
-      } catch (e) { if (e.message !== "401") modMsg(mid, "退出失败：" + e.message, false); }
-    } else if (act === "smzdm-save") {
-      var ck = $("smzdmCookie").value.trim();
-      if (!ck) { modMsg(mid, "请粘贴 Cookie", false); return; }
-      modMsg(mid, "保存中…");
-      try {
-        var r4 = await api("POST", "/api/smzdm/cookie", { cookie: ck });
-        if (r4.ok) { modMsg(mid, "Cookie 已保存" + (r4.smzdm_id ? "（" + r4.smzdm_id + "）" : ""), true); refresh(); return; }
-        modMsg(mid, r4.msg || "保存失败", false);
-      } catch (e) { if (e.message !== "401") modMsg(mid, "保存失败：" + e.message, false); }
-    } else if (act === "smzdm-logout") {
-      try {
-        await api("POST", "/api/smzdm/logout");
-        modMsg(mid, "已清除 Cookie", true);
-        refresh();
-      } catch (e) { if (e.message !== "401") modMsg(mid, "清除失败：" + e.message, false); }
-    }
-  }
-
-  function loadCaptcha() {
-    var headers = {};
-    var k = key();
-    if (k) headers["Authorization"] = "Bearer " + k;
-    fetch("/api/wnflb/captcha?id=" + encodeURIComponent(captchaId) + "&t=" + Date.now(),
-        { headers: headers })
-      .then(function (r) { if (!r.ok) throw new Error("拉取失败"); return r.blob(); })
-      .then(function (b) { $("wnflbCaptchaImg").src = URL.createObjectURL(b); })
-      .catch(function (e) { say("验证码拉取失败：" + e.message, false); });
-  }
-
-  async function refresh() {
-    // 用户正在输入时跳过重渲染，避免输入框被清空
-    var ae = document.activeElement;
-    var typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") &&
-      document.querySelector(".wrap").contains(ae);
-    if (typing) return;
-    // 其余区块互相独立，先并行加载，不排队等签到列表
-    loadNotify();
-    loadSettings();
-    loadAccounts();
-    try {
-      var r = await api("GET", "/api/checkins");
-      render(r.modules || []);
-    } catch (e) { if (e.message !== "401") say("加载失败：" + e.message, false); }
-  }
-
-  // ---- Bark 通知设置 ----
-  function notifySay(t, ok) {
-    var m = $("notifyMsg");
-    if (!m) return;
-    m.textContent = t;
-    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
-  }
-
-  async function loadNotify() {
-    try {
-      var r = await api("GET", "/api/notify/config");
-      $("barkServer").value = r.server || "";
-      $("barkServer").placeholder = r.server || "https://api.day.app";
-      $("barkDefaultState").textContent = r.default_set ? ("已设置 " + (r.default_key || "")) : "未设置";
-      (r.modules || []).forEach(function (mm) {
-        var st = document.querySelector('[data-bark-state="' + mm.id + '"]');
-        if (st) st.textContent = mm.set ? ("已设置 " + (mm.key || "")) : "未设置（用默认）";
-      });
-    } catch (e) { /* 通知未启用时静默 */ }
-  }
-
-  async function saveNotify(body) {
-    try {
-      var r = await api("PUT", "/api/notify/config", body);
-      notifySay(r.msg || "已保存", r.ok);
-      if (r.ok) { $("barkDefaultKey").value = ""; loadNotify(); }
-    } catch (e) { if (e.message !== "401") notifySay("保存失败：" + e.message, false); }
-  }
-
-  $("btnSaveNotify").onclick = function () {
-    var body = { server: $("barkServer").value.trim(), modules: {} };
-    var dk = $("barkDefaultKey").value.trim();
-    if (dk) body.default_key = dk;
-    saveNotify(body);
-  };
-  $("btnClearDefault").onclick = function () { saveNotify({ default_key: "CLEAR", modules: {} }); };
-  $("btnTestNotify").onclick = async function () {
-    notifySay("发送中…");
-    try {
-      var r = await api("POST", "/api/notify/test", { module: "" });
-      notifySay(r.msg || "已发送", r.ok);
-    } catch (e) { if (e.message !== "401") notifySay("发送失败：" + e.message, false); }
-  };
-
-  async function barkAction(act, btn) {
-    var card = btn.closest(".card");
-    var mid = card.getAttribute("data-mid");
-    var input = card.querySelector('[data-bark-key="' + mid + '"]');
-    if (act === "bark-save") {
-      var v = input ? input.value.trim() : "";
-      if (!v) { modMsg(mid, "请先输入新的 Bark Key（留空不会修改）", false); return; }
-      var mods = {}; mods[mid] = v;
-      try {
-        var r = await api("PUT", "/api/notify/config", { modules: mods });
-        modMsg(mid, r.msg || "已保存", r.ok);
-        if (r.ok) { input.value = ""; loadNotify(); }
-      } catch (e) { if (e.message !== "401") modMsg(mid, "保存失败：" + e.message, false); }
-    } else if (act === "bark-clear") {
-      var mods2 = {}; mods2[mid] = "CLEAR";
-      try {
-        var r2 = await api("PUT", "/api/notify/config", { modules: mods2 });
-        modMsg(mid, r2.msg || "已清除", r2.ok);
-        if (r2.ok) loadNotify();
-      } catch (e) { if (e.message !== "401") modMsg(mid, "清除失败：" + e.message, false); }
-    } else if (act === "bark-test") {
-      modMsg(mid, "发送中…");
-      try {
-        var r3 = await api("POST", "/api/notify/test", { module: mid });
-        modMsg(mid, r3.msg || "已发送", r3.ok);
-      } catch (e) { if (e.message !== "401") modMsg(mid, "发送失败：" + e.message, false); }
-    }
-  }
-
-  // ---- 统一签到设置 ----
-  function settingsSay(t, ok) {
-    var m = $("settingsMsg");
-    if (!m) return;
-    m.textContent = t;
-    m.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
-  }
-
-  async function loadSettings() {
-    try {
-      var r = await api("GET", "/api/checkins/settings");
-      var times = (r.checkin_times || []).join(",");
-      var input = $("checkinTimes");
-      if (document.activeElement !== input) input.value = times;
-      var info = "下次统一签到：" + (r.next_fire || "—") +
-        " · 保活时间：" + ((r.keepalive_hours || []).join(",") || "—") +
-        "<br>启动兜底补签：" + (r.catchup_on_startup ? "开启" : "关闭") +
-        " · " + esc(r.retry_policy || "");
-      $("settingsInfo").innerHTML = info;
-    } catch (e) { /* 静默 */ }
-  }
-
-  $("btnSaveTimes").onclick = async function () {
-    var v = $("checkinTimes").value.trim();
-    var times = v ? v.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
-    try {
-      var r = await api("PUT", "/api/config", { checkin_times: times });
-      settingsSay(r.ok === false ? (r.msg || "保存失败") : "签到时间已保存", r.ok !== false);
-      loadSettings();
-    } catch (e) { if (e.message !== "401") settingsSay("保存失败：" + e.message, false); }
-  };
-
-  // ---- AI 账号（WorkBuddy / TraeWork）----
-  function acctMsg(el, t, ok) {
+  function setMsg(el, t, ok) {
     if (!el) return;
-    el.textContent = t;
-    el.style.color = ok === true ? "#189225" : (ok === false ? "#d4380d" : "#666");
+    el.textContent = t || "";
+    el.style.color = ok === true ? "var(--ok)" : (ok === false ? "var(--err)" : "var(--muted)");
+  }
+
+  // ---------------------------------------------------------------------------
+  // 账号卡片（WorkBuddy / TraeWork）
+  // ---------------------------------------------------------------------------
+  function barkLineHTML(set, maskedKey) {
+    var state = set ? ("已单独设置 " + esc(maskedKey || "")) : "用默认设备";
+    return '<div class="bark-line"><span class="grow">📣 Bark：' + state + '</span>' +
+      '<button class="btn small" data-bark-toggle>单独设置</button></div>' +
+      '<div class="bark-edit hidden">' +
+      '<input class="input" type="password" data-bark-input placeholder="输入本账号专属 Bark Key，留空 = 不修改" autocomplete="off" style="margin-top:2px">' +
+      '<div class="row">' +
+      '<button class="btn small primary" data-bark-save>保存</button>' +
+      '<button class="btn small" data-bark-test>测试此设备</button>' +
+      '<button class="btn small danger" data-bark-clear>清除（改用默认）</button>' +
+      '</div></div><div class="msg" data-card-msg></div>';
+  }
+
+  function accountCard(v) {
+    var isWB = v.group === "workbuddy";
+    var name = v.nickname || ("账号 " + String(v.uid).slice(0, 8));
+    var credits = (v.credits === "" || v.credits == null) ? "—" : esc(v.credits);
+    var h = '<div class="acct" data-acct="' + esc(v.group + ":" + v.uid) + '" data-uid="' + esc(v.uid) + '">';
+    h += '<div class="acct-row1"><span class="acct-icon ' + (isWB ? "icon-wb" : "icon-trae") + '">' +
+      (isWB ? "W" : "T") + '</span>' +
+      '<span class="acct-name">' + esc(name) + '</span>' +
+      '<span class="acct-credits">' + credits + '<span class="unit">积分</span></span></div>';
+    var st;
+    if (v.disabled) st = '<span class="bad">已禁用（不会自动签到）</span>';
+    else if (v.last_checkin_at) st = '上次签到 ' + esc(v.last_checkin_at) + ' · ' +
+      (v.last_checkin_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
+      (v.last_checkin_msg ? ' ' + esc(v.last_checkin_msg) : '');
+    else st = '尚未签到';
+    h += '<div class="acct-row2"><span class="acct-status">' + st + '</span>' +
+      '<span class="acct-actions">' +
+      '<button class="btn go small" data-aact="run">立即签到</button>' +
+      '<button class="btn small" data-aact="refresh">刷新积分</button>' +
+      '<button class="btn small danger" data-aact="del">删除</button>' +
+      '</span></div>';
+    h += '<div class="acct-row3">' + barkLineHTML(v.bark_set, v.bark_key) + '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  function numCredits(s) {
+    var n = parseInt(String(s == null ? "" : s).replace(/,/g, ""), 10);
+    return isNaN(n) ? 0 : n;
   }
 
   function renderAccounts(list) {
-    function card(v) {
-      var name = v.nickname || ("账号 " + String(v.uid).slice(0, 8));
-      var h = '<div class="card" data-acct="' + esc(v.group + ":" + v.uid) + '">';
-      h += '<h2>' + esc(name) + '</h2><div class="desc">' +
-        (v.group === "workbuddy" ? "WorkBuddy" : "TraeWork") +
-        (v.disabled ? ' · <span class="bad">已禁用</span>' : '') + '</div>';
-      h += '<div class="row"><span class="k">当前积分</span><span class="v">' + esc(v.credits) + '</span></div>';
-      h += '<div class="row"><span class="k">上次签到</span><span class="v">' +
-        (v.last_checkin_at ? esc(v.last_checkin_at) + ' · ' +
-          (v.last_checkin_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
-          (v.last_checkin_msg ? ' ' + esc(v.last_checkin_msg) : '') : "—") + '</span></div>';
-      h += '<div style="margin-top:8px"><button data-aact="run">立即签到</button></div>';
-      h += '<div class="loginForm"><div style="font-size:13px;color:#888">Bark 设备 Key（可选，留空用默认设备；当前：' +
-        (v.bark_set ? "已设置 " + esc(v.bark_key || "") : "未设置（用默认）") + '）</div>' +
-        '<input type="password" data-abark placeholder="留空 = 不修改" autocomplete="off">' +
-        '<div><button data-aact="bark-save" class="ghost">保存 Bark 设置</button>' +
-        '<button data-aact="bark-test" class="ghost">测试此设备</button>' +
-        '<button data-aact="bark-clear" class="ghost">清除</button></div></div>';
-      h += '<div class="msg" data-amsg></div></div>';
-      return h;
-    }
-    var wb = list.filter(function (v) { return v.group === "workbuddy"; });
-    var tw = list.filter(function (v) { return v.group === "traework"; });
-    $("wbAccounts").innerHTML = wb.length ? wb.map(card).join("") :
-      '<div class="card empty">暂无 WorkBuddy 账号</div>';
-    $("twAccounts").innerHTML = tw.length ? tw.map(card).join("") :
-      '<div class="card empty">暂无 TraeWork 账号</div>';
+    var wb = [], tw = [];
+    list.forEach(function (v) { (v.group === "traework" ? tw : wb).push(v); });
+    $("wbList").innerHTML = wb.length ? wb.map(accountCard).join("") : '<div class="empty">暂无 WorkBuddy 账号，点上方「＋ 添加账号」登录</div>';
+    $("twList").innerHTML = tw.length ? tw.map(accountCard).join("") : '<div class="empty">暂无 TraeWork 账号，点上方「＋ 添加账号」登录</div>';
+    $("wbCountText").textContent = wb.length ? "（" + wb.length + "）" : "";
+    $("twCountText").textContent = tw.length ? "（" + tw.length + "）" : "";
+
+    function sum(arr) { return arr.reduce(function (a, v) { return a + numCredits(v.credits); }, 0); }
+    var wbSum = sum(wb), twSum = sum(tw);
+    $("totalCredits").textContent = (wbSum + twSum).toLocaleString();
+    $("wbCredits").textContent = wb.length ? wbSum.toLocaleString() : "—";
+    $("traeCredits").textContent = tw.length ? twSum.toLocaleString() : "—";
+    $("wbCount").textContent = wb.length ? wb.length + " 个账号" : "";
+    $("traeCount").textContent = tw.length ? tw.length + " 个账号" : "";
+    $("splitWB").classList.toggle("empty", !wb.length);
+    $("splitTW").classList.toggle("empty", !tw.length);
+
     document.querySelectorAll("[data-aact]").forEach(function (btn) {
       btn.onclick = function () { acctAction(btn); };
     });
+    wireBarkCards($("wbList"), "account");
+    wireBarkCards($("twList"), "account");
   }
 
   async function loadAccounts() {
@@ -451,55 +490,499 @@
   }
 
   async function acctAction(btn) {
-    var card = btn.closest(".card");
-    var acct = card.getAttribute("data-acct"); // platform:uid
-    var uid = acct.slice(acct.indexOf(":") + 1);
-    var msgEl = card.querySelector("[data-amsg]");
+    var card = btn.closest(".acct");
+    var uid = card.getAttribute("data-uid");
+    var msgEl = card.querySelector("[data-card-msg]");
     var act = btn.getAttribute("data-aact");
     if (act === "run") {
       btn.disabled = true;
-      acctMsg(msgEl, "签到中…");
+      setMsg(msgEl, "签到中…");
       try {
         var r = await api("POST", "/api/checkin/account", { uid: uid });
-        acctMsg(msgEl, r.msg || (r.ok ? "完成" : "失败"), r.ok);
-      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "请求失败：" + e.message, false); }
+        setMsg(msgEl, msgOf(r, r.ok ? "完成" : "失败"), r.ok);
+        toast("签到" + (r.ok ? "成功" : "失败") + (r.msg ? "：" + r.msg : ""));
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "请求失败：" + e.message, false); }
       btn.disabled = false;
       loadAccounts();
-    } else if (act === "bark-save") {
-      var input = card.querySelector("[data-abark]");
-      var v = input ? input.value.trim() : "";
-      if (!v) { acctMsg(msgEl, "请先输入新的 Bark Key（留空不会修改）", false); return; }
-      var accts = {}; accts[acct] = v;
+    } else if (act === "refresh") {
+      btn.disabled = true;
+      setMsg(msgEl, "刷新中…");
       try {
-        var r2 = await api("PUT", "/api/notify/config", { accounts: accts });
-        acctMsg(msgEl, r2.msg || "已保存", r2.ok);
-        if (r2.ok) { input.value = ""; loadAccounts(); }
-      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "保存失败：" + e.message, false); }
-    } else if (act === "bark-clear") {
-      var accts2 = {}; accts2[acct] = "CLEAR";
-      try {
-        var r3 = await api("PUT", "/api/notify/config", { accounts: accts2 });
-        acctMsg(msgEl, r3.msg || "已清除", r3.ok);
-        if (r3.ok) loadAccounts();
-      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "清除失败：" + e.message, false); }
-    } else if (act === "bark-test") {
-      acctMsg(msgEl, "发送中…");
-      try {
-        var r4 = await api("POST", "/api/notify/test", { account: acct });
-        acctMsg(msgEl, r4.msg || "已发送", r4.ok);
-      } catch (e) { if (e.message !== "401") acctMsg(msgEl, "发送失败：" + e.message, false); }
+        var r2 = await api("POST", "/api/refresh/account", { uid: uid });
+        setMsg(msgEl, r2.error ? msgOf(r2, "刷新失败") : "积分已刷新", !r2.error);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "请求失败：" + e.message, false); }
+      btn.disabled = false;
+      loadAccounts();
+    } else if (act === "del") {
+      var nameEl = card.querySelector(".acct-name");
+      askConfirm("删除账号", "确定删除账号「" + (nameEl ? nameEl.textContent.trim() : uid) + "」吗？删除后将停止该账号的自动签到。", async function () {
+        try {
+          var r3 = await api("DELETE", "/api/account/" + encodeURIComponent(uid));
+          toast(r3.error ? msgOf(r3, "删除失败") : "账号已删除");
+        } catch (e) { if (e.message !== "401") toast("删除失败：" + e.message); }
+        loadAccounts();
+      });
     }
   }
 
-  $("btnKey").onclick = function () {
-    var v = $("apiKeyInput").value;
-    try { sessionStorage.setItem(LS_KEY, v); } catch (e) {}
-    $("keyOverlay").style.display = "none";
-    refresh();
+  // ---------------------------------------------------------------------------
+  // Bark 行（账号卡片 / 模块卡片共用）
+  // kind: "account"（id = group:uid）| "module"（id = 模块 id）
+  // ---------------------------------------------------------------------------
+  function wireBarkCards(container, kind) {
+    if (!container) return;
+    container.querySelectorAll(".acct, .mod-card").forEach(function (card) {
+      var id = kind === "account" ? card.getAttribute("data-acct") : card.getAttribute("data-mid");
+      if (!id) return;
+      var toggle = card.querySelector("[data-bark-toggle]");
+      var edit = card.querySelector(".bark-edit");
+      var input = card.querySelector("[data-bark-input]");
+      var msgEl = card.querySelector("[data-card-msg]");
+      if (toggle && edit) toggle.onclick = function () { edit.classList.toggle("hidden"); };
+      var saveBtn = card.querySelector("[data-bark-save]");
+      var testBtn = card.querySelector("[data-bark-test]");
+      var clearBtn = card.querySelector("[data-bark-clear]");
+      if (saveBtn) saveBtn.onclick = async function () {
+        var v = input ? input.value.trim() : "";
+        if (!v) { setMsg(msgEl, "请先输入新的 Bark Key（留空不会修改）", false); return; }
+        var body = {};
+        if (kind === "account") { body.accounts = {}; body.accounts[id] = v; }
+        else { body.modules = {}; body.modules[id] = v; }
+        try {
+          var r = await api("PUT", "/api/notify/config", body);
+          setMsg(msgEl, msgOf(r, "已保存"), r.ok);
+          if (r.ok) { input.value = ""; reloadBarkSources(kind); }
+        } catch (e) { if (e.message !== "401") setMsg(msgEl, "保存失败：" + e.message, false); }
+      };
+      if (clearBtn) clearBtn.onclick = async function () {
+        var body = {};
+        if (kind === "account") { body.accounts = {}; body.accounts[id] = "CLEAR"; }
+        else { body.modules = {}; body.modules[id] = "CLEAR"; }
+        try {
+          var r = await api("PUT", "/api/notify/config", body);
+          setMsg(msgEl, msgOf(r, "已清除"), r.ok);
+          if (r.ok) reloadBarkSources(kind);
+        } catch (e) { if (e.message !== "401") setMsg(msgEl, "清除失败：" + e.message, false); }
+      };
+      if (testBtn) testBtn.onclick = async function () {
+        setMsg(msgEl, "发送中…");
+        try {
+          var body = kind === "account" ? { account: id } : { module: id };
+          var r = await api("POST", "/api/notify/test", body);
+          setMsg(msgEl, msgOf(r, "已发送"), r.ok);
+        } catch (e) { if (e.message !== "401") setMsg(msgEl, "发送失败：" + e.message, false); }
+      };
+    });
+  }
+
+  function reloadBarkSources(kind) {
+    if (kind === "account") loadAccounts();
+    else { loadNotify(); loadModules(); }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 第三方模块卡片（福利吧 / 什么值得买）
+  // ---------------------------------------------------------------------------
+  function moduleCard(m) {
+    var icon = m.id === "wnflb" ? "福" : (m.id === "smzdm" ? "值" : "签");
+    var cls = m.id === "wnflb" ? "icon-wnflb" : "icon-smzdm";
+    var badge;
+    if (!m.configured) badge = '<span class="badge b-mut">未配置</span>';
+    else if (!m.logged_in) badge = '<span class="badge b-err">登录已过期</span>';
+    else badge = '<span class="badge b-ok">正常</span>';
+    var h = '<div class="acct mod-card" data-mid="' + esc(m.id) + '">';
+    h += '<div class="acct-row1"><span class="acct-icon ' + cls + '">' + icon + '</span>' +
+      '<span class="acct-name">' + esc(m.name) +
+      (m.username ? '<span class="uname">' + esc(m.username) + '</span>' : '') + '</span>' +
+      badge +
+      '<span class="acct-credits">' + (m.points ? esc(m.points) : "—") +
+      '<span class="unit">' + esc(m.points_name || "积分") + '</span></span></div>';
+    var st = m.last_at ? ('上次签到 ' + esc(m.last_at) + ' · ' +
+      (m.last_ok ? '<span class="ok">成功</span>' : '<span class="bad">失败</span>') +
+      (m.last_msg ? ' ' + esc(m.last_msg) : '')) : '尚未签到';
+    st += '　·　下次 ' + esc(m.next_at || "—") + (m.times ? '（每天 ' + esc(m.times) + '）' : '');
+    h += '<div class="acct-row2"><span class="acct-status">' + st + '</span>' +
+      '<span class="acct-actions">' +
+      '<button class="btn go small" data-mact="run">立即签到</button>';
+    if (m.id === "wnflb" && m.logged_in) h += '<button class="btn small" data-mact="logout">退出登录</button>';
+    if (m.id === "smzdm" && m.logged_in) h += '<button class="btn small" data-mact="smzdm-logout">清除 Cookie</button>';
+    h += '</span></div>';
+    // 福利吧登录表单（未登录时展开）
+    if (m.id === "wnflb" && !m.logged_in) {
+      h += '<div class="subform"><div class="f-title">账号登录</div>' +
+        '<input class="input" type="text" id="wnflbUser" placeholder="论坛账号" autocomplete="username">' +
+        '<input class="input" type="password" id="wnflbPass" placeholder="论坛密码" autocomplete="current-password" style="margin-top:8px">' +
+        '<div class="row"><button class="btn primary" data-mact="login">登录</button></div>' +
+        '<div id="wnflbCaptchaBox" class="hidden">' +
+        '<div class="hint">本次登录需要验证码（点击图片可换一张）：</div>' +
+        '<img class="captchaImg" id="wnflbCaptchaImg" alt="验证码">' +
+        '<input class="input" type="text" id="wnflbCaptchaCode" placeholder="输入验证码" autocomplete="off">' +
+        '<div class="row"><button class="btn primary" data-mact="captcha">提交验证码</button></div></div></div>';
+    }
+    // 什么值得买 Cookie 表单（未配置时展开）
+    if (m.id === "smzdm" && !m.logged_in) {
+      h += '<div class="subform"><div class="f-title">Cookie 配置</div>' +
+        '<div class="hint" style="margin-top:0">从什么值得买 APP 抓包获取完整 Cookie（须包含 sess 字段），粘贴到下方：</div>' +
+        '<textarea class="input" id="smzdmCookie" rows="3" style="font-family:var(--mono);font-size:13px;margin-top:6px" ' +
+        'placeholder="sess=...; smzdm_id=...; device_id=...; ..."></textarea>' +
+        '<div class="row"><button class="btn primary" data-mact="smzdm-save">保存 Cookie</button></div></div>';
+    }
+    var mb = moduleBark[m.id] || {};
+    h += '<div class="acct-row3">' + barkLineHTML(!!mb.set, mb.key) + '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  function renderModules(mods) {
+    var box = $("modList");
+    if (!mods || !mods.length) {
+      box.innerHTML = '<div class="empty">暂无签到模块</div>';
+      return;
+    }
+    box.innerHTML = mods.map(moduleCard).join("");
+    box.querySelectorAll("[data-mact]").forEach(function (btn) {
+      btn.onclick = function () { modAction(btn.getAttribute("data-mact"), btn); };
+    });
+    var ci = $("wnflbCaptchaImg");
+    if (ci) ci.onclick = loadCaptcha;
+    wireBarkCards(box, "module");
+  }
+
+  async function loadModules() {
+    try {
+      var r = await api("GET", "/api/checkins");
+      renderModules(r.modules || []);
+    } catch (e) { if (e.message !== "401") say("加载签到模块失败：" + e.message, false); }
+  }
+
+  async function modAction(act, btn) {
+    var card = btn.closest(".mod-card");
+    var mid = card.getAttribute("data-mid");
+    var msgEl = card.querySelector("[data-card-msg]");
+    if (act === "run") {
+      btn.disabled = true;
+      setMsg(msgEl, "签到中…");
+      try {
+        var r = await api("POST", "/api/checkins/" + encodeURIComponent(mid) + "/run");
+        setMsg(msgEl, msgOf(r, r.ok ? "完成" : "失败"), r.ok);
+        toast(msgOf(r, "完成"));
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "请求失败：" + e.message, false); }
+      btn.disabled = false;
+      loadModules();
+    } else if (act === "login") {
+      var u = $("wnflbUser").value.trim(), p = $("wnflbPass").value;
+      if (!u || !p) { setMsg(msgEl, "请输入账号和密码", false); return; }
+      setMsg(msgEl, "登录中…");
+      try {
+        var r2 = await api("POST", "/api/wnflb/login", { username: u, password: p });
+        if (r2.ok) { toast("福利吧登录成功"); captchaId = ""; loadModules(); return; }
+        if (r2.need_captcha) {
+          captchaId = r2.captcha_id; captchaUser = u; captchaPass = p;
+          $("wnflbCaptchaBox").classList.remove("hidden");
+          loadCaptcha();
+          setMsg(msgEl, "本次登录需要验证码，请识别并提交", false);
+          return;
+        }
+        setMsg(msgEl, msgOf(r2, "登录失败"), false);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "登录请求失败：" + e.message, false); }
+    } else if (act === "captcha") {
+      var code = $("wnflbCaptchaCode").value.trim();
+      if (!code) { setMsg(msgEl, "请输入验证码", false); return; }
+      setMsg(msgEl, "提交中…");
+      try {
+        var r3 = await api("POST", "/api/wnflb/captcha",
+          { id: captchaId, code: code, username: captchaUser, password: captchaPass });
+        if (r3.ok) { toast("福利吧登录成功"); captchaId = ""; loadModules(); return; }
+        if (r3.need_retry) {
+          captchaId = r3.captcha_id;
+          $("wnflbCaptchaCode").value = "";
+          loadCaptcha();
+          setMsg(msgEl, msgOf(r3, "验证码不正确，已换一张"), false);
+          return;
+        }
+        setMsg(msgEl, msgOf(r3, "登录失败"), false);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "提交失败：" + e.message, false); }
+    } else if (act === "logout") {
+      try {
+        await api("POST", "/api/wnflb/logout");
+        toast("已退出福利吧登录");
+        loadModules();
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "退出失败：" + e.message, false); }
+    } else if (act === "smzdm-save") {
+      var ck = $("smzdmCookie").value.trim();
+      if (!ck) { setMsg(msgEl, "请粘贴 Cookie", false); return; }
+      setMsg(msgEl, "保存中…");
+      try {
+        var r4 = await api("POST", "/api/smzdm/cookie", { cookie: ck });
+        if (r4.ok) { toast("Cookie 已保存" + (r4.smzdm_id ? "（" + r4.smzdm_id + "）" : "")); loadModules(); return; }
+        setMsg(msgEl, msgOf(r4, "保存失败"), false);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "保存失败：" + e.message, false); }
+    } else if (act === "smzdm-logout") {
+      try {
+        await api("POST", "/api/smzdm/logout");
+        toast("已清除什么值得买 Cookie");
+        loadModules();
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "清除失败：" + e.message, false); }
+    }
+  }
+
+  function loadCaptcha() {
+    var headers = {};
+    var k = key();
+    if (k) headers["Authorization"] = "Bearer " + k;
+    fetch("/api/wnflb/captcha?id=" + encodeURIComponent(captchaId) + "&t=" + Date.now(), { headers: headers })
+      .then(function (r) { if (!r.ok) throw new Error("拉取失败"); return r.blob(); })
+      .then(function (b) { var img = $("wnflbCaptchaImg"); if (img) img.src = URL.createObjectURL(b); })
+      .catch(function (e) { say("验证码拉取失败：" + e.message, false); });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 通知设置（Bark 默认设备）
+  // ---------------------------------------------------------------------------
+  function notifySay(t, ok) { setMsg($("notifyMsg"), t, ok); }
+
+  async function loadNotify() {
+    try {
+      var r = await api("GET", "/api/notify/config");
+      if (document.activeElement !== $("barkServer")) $("barkServer").value = r.server || "";
+      $("barkDefaultState").textContent = r.default_set ? ("已设置 " + (r.default_key || "")) : "未设置";
+      moduleBark = {};
+      (r.modules || []).forEach(function (mm) { moduleBark[mm.id] = { set: !!mm.set, key: mm.key || "" }; });
+      // 模块卡片的 Bark 状态依赖这份数据：若模块先渲染完，这里补刷一次
+      loadModules();
+    } catch (e) { /* 通知未启用时静默 */ }
+  }
+
+  async function saveNotify(body) {
+    try {
+      var r = await api("PUT", "/api/notify/config", body);
+      notifySay(msgOf(r, "已保存"), r.ok);
+      if (r.ok) { $("barkDefaultKey").value = ""; loadNotify().then(loadModules); }
+    } catch (e) { if (e.message !== "401") notifySay("保存失败：" + e.message, false); }
+  }
+
+  $("btnSaveNotify").onclick = function () {
+    var body = { server: $("barkServer").value.trim() };
+    var dk = $("barkDefaultKey").value.trim();
+    if (dk) body.default_key = dk;
+    saveNotify(body);
+  };
+  $("btnClearDefault").onclick = function () { saveNotify({ default_key: "CLEAR" }); };
+  $("btnTestNotify").onclick = async function () {
+    notifySay("发送中…");
+    try {
+      var r = await api("POST", "/api/notify/test", { module: "" });
+      notifySay(msgOf(r, "已发送"), r.ok);
+    } catch (e) { if (e.message !== "401") notifySay("发送失败：" + e.message, false); }
   };
 
-  refresh();
-  setInterval(refresh, 15000);
+  // ---------------------------------------------------------------------------
+  // 签到设置（时间 chips，沿用原版样式）
+  // ---------------------------------------------------------------------------
+  function settingsSay(t, ok) { setMsg($("settingsMsg"), t, ok); }
+
+  function renderChips(times) {
+    var box = $("hoursBox");
+    box.innerHTML = "";
+    (times || []).forEach(function (t) { addChip(t); });
+  }
+  function addChip(value) {
+    var box = $("hoursBox");
+    var chip = document.createElement("span");
+    chip.className = "hour-chip";
+    chip.innerHTML = '<input type="time" value="' + esc(value || "09:00") + '"><button class="del" title="删除">✕</button>';
+    chip.querySelector(".del").onclick = function () { chip.remove(); };
+    box.appendChild(chip);
+  }
+  $("btnAddHour").onclick = function () { addChip("09:00"); };
+
+  async function loadSettings() {
+    try {
+      var r = await api("GET", "/api/checkins/settings");
+      renderChips(r.checkin_times || []);
+      if (r.next_fire) $("nextFireText").textContent = "下次签到 " + r.next_fire;
+      var info = "下次统一签到：" + (r.next_fire || "—") +
+        " · 当前服务器时间 " + (r.server_now || "") + "<br>" +
+        "保活：每 " + ((r.keepalive_hours || []).join(" / ") || "—") + " 小时自动 · 启动兜底补签：" +
+        (r.catchup_on_startup ? "开启" : "关闭") + "<br>" + esc(r.retry_policy || "");
+      $("settingsInfo").innerHTML = info;
+    } catch (e) { /* 静默 */ }
+  }
+
+  $("btnSaveTimes").onclick = async function () {
+    var times = [];
+    document.querySelectorAll("#hoursBox input[type=time]").forEach(function (inp) {
+      if (inp.value) times.push(inp.value);
+    });
+    if (!times.length) { settingsSay("至少保留一个签到时间", false); return; }
+    try {
+      var r = await api("PUT", "/api/config", { checkin_times: times });
+      settingsSay(msgOf(r, "签到时间已保存"), r.ok !== false && !r.error);
+      loadSettings();
+    } catch (e) { if (e.message !== "401") settingsSay("保存失败：" + e.message, false); }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 全部签到 / 全部刷新
+  // ---------------------------------------------------------------------------
+  $("btnCheckinAll").onclick = async function () {
+    var btn = $("btnCheckinAll");
+    btn.disabled = true;
+    say("全部签到中…");
+    try {
+      var r = await api("POST", "/api/checkin/all");
+      var arr = Array.isArray(r) ? r : [];
+      var ok = arr.filter(function (x) { return x.ok; }).length;
+      say("全部签到完成：" + ok + "/" + arr.length + " 成功", ok === arr.length);
+      toast("全部签到完成 " + ok + "/" + arr.length);
+    } catch (e) { if (e.message !== "401") say("全部签到失败：" + e.message, false); }
+    btn.disabled = false;
+    loadAccounts();
+  };
+  $("btnRefreshAll").onclick = async function () {
+    var btn = $("btnRefreshAll");
+    btn.disabled = true;
+    say("刷新积分中…");
+    try {
+      var r = await api("POST", "/api/refresh/all");
+      say(msgOf(r, "刷新完成：成功 " + (r.refreshed || 0) + "，失败 " + (r.failed || 0)), !r.error);
+    } catch (e) { if (e.message !== "401") say("刷新失败：" + e.message, false); }
+    btn.disabled = false;
+    loadAccounts();
+  };
+
+  // ---------------------------------------------------------------------------
+  // 添加账号（登录流程）
+  // ---------------------------------------------------------------------------
+  function openLogin(platform) {
+    loginPlatform = platform;
+    $("loginTitle").textContent = platform === "traework" ? "添加 TraeWork 账号" : "添加 WorkBuddy 账号";
+    $("loginMsg").textContent = "正在发起登录…";
+    $("loginStatus").textContent = "";
+    $("loginUrl").classList.add("hidden");
+    $("loginOverlay").classList.remove("hidden");
+    startLogin(platform);
+  }
+  $("btnAddWB").onclick = function () { openLogin("workbuddy"); };
+  $("btnAddTrae").onclick = function () { openLogin("traework"); };
+
+  async function startLogin(platform) {
+    try {
+      var r = await api("POST", "/api/login/start", { platform: platform });
+      if (!r.auth_url) { $("loginMsg").textContent = msgOf(r, "发起登录失败"); return; }
+      loginState = r.state || "";
+      var a = $("loginUrl");
+      a.href = r.auth_url;
+      a.textContent = "打开授权链接（" + (platform === "traework" ? "TraeWork" : "WorkBuddy") + "）";
+      a.classList.remove("hidden");
+      $("loginMsg").textContent = r.hint || "请打开授权链接完成登录，本页面会自动检测结果。";
+      window.open(r.auth_url, "_blank");
+      pollLogin();
+    } catch (e) {
+      if (e.message !== "401") $("loginMsg").textContent = "发起登录失败：" + e.message;
+    }
+  }
+
+  function pollLogin() {
+    clearInterval(loginTimer);
+    loginTimer = setInterval(async function () {
+      try {
+        var r = await api("GET", "/api/login/poll?state=" + encodeURIComponent(loginState));
+        if (r.phase === "success") {
+          stopLogin();
+          toast(r.msg || "登录成功");
+          loadAccounts();
+        } else if (r.phase === "failed" || r.phase === "cancelled") {
+          $("loginStatus").textContent = r.msg || "登录失败";
+          clearInterval(loginTimer);
+        } else {
+          $("loginStatus").textContent = r.msg || "等待登录…";
+        }
+      } catch (e) { /* 继续轮询 */ }
+    }, 2500);
+  }
+
+  function stopLogin() {
+    clearInterval(loginTimer);
+    loginState = "";
+    $("loginOverlay").classList.add("hidden");
+  }
+  $("btnCancelLogin").onclick = async function () {
+    try { await api("POST", "/api/login/cancel", { state: loginState }); } catch (e) {}
+    stopLogin();
+  };
+  $("btnOpenUrl").onclick = function () {
+    var a = $("loginUrl");
+    if (a && a.href) window.open(a.href, "_blank");
+  };
+  $("btnCopyUrl").onclick = function () {
+    var a = $("loginUrl");
+    if (!a || !a.href) return;
+    var done = function () { toast("授权链接已复制"); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(a.href).then(done, function () { fallbackCopy(a.href, done); });
+    } else {
+      fallbackCopy(a.href, done);
+    }
+  };
+  function fallbackCopy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { toast("复制失败，请长按链接复制"); }
+    document.body.removeChild(ta);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 确认弹层 / API Key
+  // ---------------------------------------------------------------------------
+  function askConfirm(title, msg, cb) {
+    $("confirmTitle").textContent = title;
+    $("confirmMsg").textContent = msg;
+    confirmCb = cb;
+    $("confirmOverlay").classList.remove("hidden");
+  }
+  $("btnConfirmCancel").onclick = function () {
+    confirmCb = null;
+    $("confirmOverlay").classList.add("hidden");
+  };
+  $("btnConfirmOk").onclick = function () {
+    var cb = confirmCb;
+    confirmCb = null;
+    $("confirmOverlay").classList.add("hidden");
+    if (cb) cb();
+  };
+
+  $("btnKey").onclick = function () {
+    try { sessionStorage.setItem(LS_KEY, $("apiKeyInput").value); } catch (e) {}
+    $("keyOverlay").classList.add("hidden");
+    loadAll();
+  };
+
+  // ---------------------------------------------------------------------------
+  // 主刷新：各区块互相独立，互不等待
+  // ---------------------------------------------------------------------------
+  function userBusy() {
+    var ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return true;
+    if (!$("loginOverlay").classList.contains("hidden")) return true;
+    if (!$("confirmOverlay").classList.contains("hidden")) return true;
+    var openEdit = document.querySelector(".bark-edit:not(.hidden)");
+    return !!openEdit;
+  }
+  function loadAll() {
+    loadAccounts();
+    loadModules();
+    loadNotify();
+    loadSettings();
+  }
+  function autoRefresh() { if (!userBusy()) loadAll(); }
+
+  loadAll();
+  setInterval(autoRefresh, 20000);
 })();
 </script>
 </body>

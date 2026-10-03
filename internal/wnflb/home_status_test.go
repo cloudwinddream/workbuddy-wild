@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -86,5 +87,10 @@ func TestProbeResultPersistsAcrossRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "status.json")); err != nil {
 		t.Fatalf("status.json 未落盘: %v", err)
+	}
+	// 等后台异步探测结束，避免与 TempDir 清理竞态（探测会回写 status.json）。
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt32(&s2.probing) != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
 }

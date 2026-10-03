@@ -306,28 +306,34 @@ func mountFrontend(mux *http.ServeMux) {
 		_, _ = io.WriteString(w, shimJS)
 	})
 
-	// /app.js /style.css：桌面版前端原文件（不修改）。
+	// /app.js /style.css：桌面版前端原文件（不修改；/legacy/ 旧面板用）。
 	mux.HandleFunc("/app.js", serveFile(filepath.Join(dir, "app.js"), "application/javascript; charset=utf-8"))
 	mux.HandleFunc("/style.css", serveFile(filepath.Join(dir, "style.css"), "text/css; charset=utf-8"))
+	mux.HandleFunc("/legacy/app.js", serveFile(filepath.Join(dir, "app.js"), "application/javascript; charset=utf-8"))
+	mux.HandleFunc("/legacy/style.css", serveFile(filepath.Join(dir, "style.css"), "text/css; charset=utf-8"))
 
-	// /checkin/：签到中心（所有签到模块统一管理，内嵌）。
-	mux.HandleFunc("/checkin/", func(w http.ResponseWriter, r *http.Request) {
+	// / 与 /checkin/：统一签到控制台（左签到 / 右设置，内嵌单页）。
+	serveConsole := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, checkinHTML)
+	}
+	mux.HandleFunc("/", serveConsole)
+	mux.HandleFunc("/checkin/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
 	})
-	// /wnflb/：旧地址，跳转到签到中心。
+	// /wnflb/：旧地址，跳转到签到控制台。
 	mux.HandleFunc("/wnflb/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/checkin/", http.StatusFound)
+		http.Redirect(w, r, "/", http.StatusFound)
 	})
 
-	// /：index.html + 注入垫片（在 app.js 之前加载，保证 window.go 先就绪）。
+	// /legacy/：旧版桌面风管理面板（垫片兼容层，积分策略 / API 监听在那边）。
 	indexRaw, err := os.ReadFile(filepath.Join(dir, "index.html"))
 	if err != nil {
-		log.Printf("警告：前端目录 %s 缺少 index.html，管理页不可用（API 正常）: %v", dir, err)
+		log.Printf("警告：前端目录 %s 缺少 index.html，旧版面板不可用（API 正常）: %v", dir, err)
 		indexRaw = []byte("<html><body>frontend not found</body></html>")
 	}
 	indexHTML := injectShim(string(indexRaw))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/legacy/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, indexHTML)
 	})
