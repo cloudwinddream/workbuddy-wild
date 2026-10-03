@@ -125,12 +125,23 @@ func main() {
 		ErrThreshold: cfg.Cooldown.ErrThresh, ErrCooldown: cfg.ErrCooldownDur,
 	})
 
+	// ---- 统一签到时间源：主账号与第三方模块（福利吧 / 什么值得买）
+	// 共用同一套签到时间；页面改时间后经回调同步，模块调度最迟 1 分钟跟随。
+	var unifiedTimesMu sync.RWMutex
+	unifiedTimes := append([]string(nil), cfg.Schedule.CheckinTimes...)
+	unifiedTimesFn := func() []string {
+		unifiedTimesMu.RLock()
+		defer unifiedTimesMu.RUnlock()
+		return append([]string(nil), unifiedTimes...)
+	}
+	unifiedTimesChanged := func(ts []string) {
+		unifiedTimesMu.Lock()
+		unifiedTimes = append([]string(nil), ts...)
+		unifiedTimesMu.Unlock()
+	}
+
 	// ---- 福利吧签到（独立模块，单账号，Go 原生实现） ----
 	wnflbSvc := wnflb.New(filepath.Join(stateDir, "wnflb"), os.Getenv("WNFLB_BASE_URL"))
-	wnflbTimes := strings.TrimSpace(os.Getenv("WNFLB_CHECKIN_TIMES"))
-	if wnflbTimes == "" {
-		wnflbTimes = "01:00,22:00"
-	}
 	// .env 引导：无存档账号且给了账号密码时自动导入（网页登录仍可覆盖）。
 	if u, p := os.Getenv("FORUM_USERNAME"), os.Getenv("FORUM_PASSWORD"); u != "" && p != "" {
 		if wnflbSvc.ImportAccountFromEnv(u, p) {
@@ -141,10 +152,6 @@ func main() {
 	// ---- 什么值得买签到（独立模块，单账号，Go 原生实现） ----
 	// 协议逆向来自 https://github.com/enwaiax/smzdm-bot（Apache-2.0），仅移植签到部分。
 	smzdmSvc := smzdm.New(filepath.Join(stateDir, "smzdm"), os.Getenv("SMZDM_BASE_URL"))
-	smzdmTimes := strings.TrimSpace(os.Getenv("SMZDM_CHECKIN_TIMES"))
-	if smzdmTimes == "" {
-		smzdmTimes = "09:00"
-	}
 	// .env 引导：无存档 Cookie 且给了 Cookie 时自动导入（网页提交仍可覆盖）。
 	if ck := strings.TrimSpace(os.Getenv("SMZDM_COOKIE")); ck != "" {
 		if smzdmSvc.ImportCookieFromEnv(ck) {
@@ -168,14 +175,14 @@ func main() {
 			provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
 		},
 		Handler: h, Version: version, StateDir: stateDir,
-		PublicBase:       publicBase(cfg),
-		SetListen:        setListen,
-		Wnflb:            wnflbSvc,
-		WnflbTimes:       wnflbTimes,
-		Smzdm:            smzdmSvc,
-		SmzdmTimes:       smzdmTimes,
-		Notify:           bark,
-		CatchupOnStartup: strings.ToLower(strings.TrimSpace(os.Getenv("WB2A_CATCHUP_ON_STARTUP"))) != "false",
+		PublicBase:          publicBase(cfg),
+		SetListen:           setListen,
+		Wnflb:               wnflbSvc,
+		Smzdm:               smzdmSvc,
+		CheckinTimesFn:      unifiedTimesFn,
+		CheckinTimesChanged: unifiedTimesChanged,
+		Notify:              bark,
+		CatchupOnStartup:    strings.ToLower(strings.TrimSpace(os.Getenv("WB2A_CATCHUP_ON_STARTUP"))) != "false",
 	})
 	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("workbuddy", r) })
 	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { api.NotifyCheckin("traework", r) })
@@ -212,12 +219,12 @@ func main() {
 			trSch.CatchUpMissed()
 		}()
 	}
-	// 福利吧每日签到（独立模块）。
+	// 福利吧每日签到（跟随统一签到时间）。
 	wnflbRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("WNFLB_RUN_ON_STARTUP"))) != "false"
-	go checkin.RunScheduler(sctx, checkin.ParseTimes(wnflbTimes), wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)
-	// 什么值得买每日签到（独立模块）。
+	go checkin.RunScheduler(sctx, unifiedTimesFn, wnflbRunOnStartup, "福利吧签到", wnflbSvc.AutoCheckin)
+	// 什么值得买每日签到（跟随统一签到时间）。
 	smzdmRunOnStartup := strings.ToLower(strings.TrimSpace(os.Getenv("SMZDM_RUN_ON_STARTUP"))) != "false"
-	go checkin.RunScheduler(sctx, checkin.ParseTimes(smzdmTimes), smzdmRunOnStartup, "什么值得买签到", smzdmSvc.AutoCheckin)
+	go checkin.RunScheduler(sctx, unifiedTimesFn, smzdmRunOnStartup, "什么值得买签到", smzdmSvc.AutoCheckin)
 
 	// ---- HTTP 服务 ----
 	if err := setListen(cfg.Listen.Host, cfg.Listen.Port); err != nil {

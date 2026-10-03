@@ -2,7 +2,6 @@ package checkin
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -46,16 +45,21 @@ func ParseTimes(s string) []string {
 	return out
 }
 
-// RunScheduler 每日定时调度：按 times 执行 fn；runOnStartup 为 true 时
-// 启动后先执行一次。ctx 取消时退出。
-func RunScheduler(ctx context.Context, times []string, runOnStartup bool, name string, fn func() string) {
-	log.Printf("[%s] 定时调度启动，时刻表 %v", name, times)
+// RunScheduler 每日定时调度：按 timesFn 提供的时刻表执行 fn（时刻表每次
+// 循环都重新读取，修改后最迟 1 分钟生效）；runOnStartup 为 true 时启动后
+// 先执行一次。ctx 取消时退出。
+func RunScheduler(ctx context.Context, timesFn func() []string, runOnStartup bool, name string, fn func() string) {
+	if timesFn == nil {
+		timesFn = func() []string { return nil }
+	}
+	log.Printf("[%s] 定时调度启动（统一签到时间）", name)
 	if runOnStartup {
 		log.Printf("[%s] 启动后先执行一次", name)
 		log.Printf("[%s] 结果: %s", name, fn())
 	}
+	var lastNext time.Time
 	for {
-		next := NextRun(times, time.Now())
+		next := NextRun(timesFn(), time.Now())
 		if next.IsZero() {
 			log.Printf("[%s] 时刻表无效，1 小时后重试", name)
 			if !sleepCtx(ctx, time.Hour) {
@@ -63,16 +67,45 @@ func RunScheduler(ctx context.Context, times []string, runOnStartup bool, name s
 			}
 			continue
 		}
+		if !next.Equal(lastNext) {
+			log.Printf("[%s] 下次执行：%s", name, next.Format("2006-01-02 15:04"))
+			lastNext = next
+		}
 		wait := time.Until(next)
-		if wait < 0 {
-			wait = 0
+		if wait > time.Minute {
+			// 还早：睡 1 分钟就重算，以便签到时间被修改时尽快跟随。
+			if !sleepCtx(ctx, time.Minute) {
+				log.Printf("[%s] 调度退出", name)
+				return
+			}
+			continue
 		}
-		log.Printf("[%s] 下次执行：%s（%s后）", name, next.Format("2006-01-02 15:04"), fmtDur(wait))
-		if !sleepCtx(ctx, wait) {
-			log.Printf("[%s] 调度退出", name)
-			return
+		// 最后一段路：小步睡到点。每步先判是否到点（到点立即执行），
+		// 再确认目标没被改掉（改掉就回外层重算）；顺序不能反——过点后
+		// NextRun 会顺延到明天，先判目标变化会把这次执行漏掉。
+		fired := false
+		for {
+			w := time.Until(next)
+			if w <= 0 {
+				log.Printf("[%s] 结果: %s", name, fn())
+				fired = true
+				break
+			}
+			if cur := NextRun(timesFn(), time.Now()); !cur.Equal(next) {
+				break
+			}
+			step := w
+			if step > 10*time.Second {
+				step = 10 * time.Second
+			}
+			if !sleepCtx(ctx, step) {
+				log.Printf("[%s] 调度退出", name)
+				return
+			}
 		}
-		log.Printf("[%s] 结果: %s", name, fn())
+		if fired {
+			lastNext = time.Time{}
+		}
 	}
 }
 
@@ -85,14 +118,4 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
-}
-
-func fmtDur(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d / time.Hour)
-	m := int((d % time.Hour) / time.Minute)
-	if h > 0 {
-		return fmt.Sprintf("%d小时%d分", h, m)
-	}
-	return fmt.Sprintf("%d分", m)
 }

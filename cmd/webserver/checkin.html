@@ -290,7 +290,7 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
       <!-- 签到设置 -->
       <div class="section" id="settingsSection">
         <div class="section-head"><span>签到设置</span></div>
-        <label class="f-label">每天签到时间（WorkBuddy / TraeWork 共用，改完即时生效）</label>
+        <label class="f-label">每天签到时间（全部签到共用：WorkBuddy / TraeWork / 福利吧 / 什么值得买，改完即时生效）</label>
         <div class="row wrap" style="align-items:flex-start">
           <div id="hoursBox" class="hours"></div>
           <button class="btn small" id="btnAddHour" title="增加一个时间">＋ 时间</button>
@@ -304,8 +304,9 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
 
       <div class="section">
         <div class="hint" style="margin-top:0">
-          说明：福利吧 / 什么值得买的签到时间在各自模块内固定（福利吧 01:00、22:00，什么值得买 09:00）。
-          积分与登录状态为缓存值，后台自动刷新。旧版完整管理面板仍可通过
+          说明：所有签到（WorkBuddy / TraeWork / 福利吧 / 什么值得买）共用这里设置的签到时间，
+          每天每个时间点各执行一轮，已签到的会自动跳过。积分与登录状态为缓存值，后台自动刷新。
+          旧版完整管理面板仍可通过
           <a href="/legacy/" style="color:var(--accent2)">/legacy/</a> 打开（积分策略、API 监听在那边）。
         </div>
       </div>

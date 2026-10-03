@@ -2,6 +2,7 @@ package smzdm
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/checkin"
@@ -9,13 +10,13 @@ import (
 
 // Adapter 把 Service 接入签到中心注册表。
 type Adapter struct {
-	svc   *Service
-	times string
+	svc     *Service
+	timesFn func() []string // 统一签到时间提供者（与主账号共用一套）
 }
 
-// NewAdapter 创建签到中心适配器。
-func NewAdapter(svc *Service, times string) *Adapter {
-	return &Adapter{svc: svc, times: times}
+// NewAdapter 创建签到中心适配器。timesFn 提供统一签到时间（可为 nil）。
+func NewAdapter(svc *Service, timesFn func() []string) *Adapter {
+	return &Adapter{svc: svc, timesFn: timesFn}
 }
 
 func (a *Adapter) ID() string   { return "smzdm" }
@@ -29,7 +30,11 @@ func (a *Adapter) Summary() checkin.Summary {
 	if st.LastGold > 0 {
 		points = fmt.Sprintf("+%d", st.LastGold)
 	}
-	next := checkin.NextRun(checkin.ParseTimes(a.times), time.Now())
+	var times []string
+	if a.timesFn != nil {
+		times = a.timesFn()
+	}
+	next := checkin.NextRun(times, time.Now())
 	nextStr := ""
 	if !next.IsZero() {
 		nextStr = next.Format("2006-01-02 15:04")
@@ -47,7 +52,7 @@ func (a *Adapter) Summary() checkin.Summary {
 		LastMsg:    st.LastMsg,
 		LastAt:     st.LastCheckinAt,
 		NextAt:     nextStr,
-		Times:      a.times,
+		Times:      strings.Join(times, ","),
 	}
 }
 

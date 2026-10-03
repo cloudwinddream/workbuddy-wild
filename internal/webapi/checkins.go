@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/checkin"
@@ -15,13 +16,21 @@ import (
 
 // wnflbModule 把 wnflb.Service 适配为 checkin.Module。
 type wnflbModule struct {
-	svc   *wnflb.Service
-	times string
+	svc     *wnflb.Service
+	timesFn func() []string // 统一签到时间提供者（与主账号共用一套）
 }
 
 func (m *wnflbModule) ID() string   { return "wnflb" }
 func (m *wnflbModule) Name() string { return "福利吧" }
 func (m *wnflbModule) Desc() string { return "福利吧论坛（wnflb2023.com）每日签到" }
+
+// times 当前统一签到时间（展示与下次执行计算用）。
+func (m *wnflbModule) times() []string {
+	if m.timesFn == nil {
+		return nil
+	}
+	return m.timesFn()
+}
 
 func (m *wnflbModule) Summary() checkin.Summary {
 	username, hasAccount := m.svc.QuickStatus()
@@ -32,7 +41,8 @@ func (m *wnflbModule) Summary() checkin.Summary {
 		// 缓存过期由服务层后台异步刷新，页面自动刷新周期内即可看到新值。
 		loggedIn, points = m.svc.CachedHomeStatus()
 	}
-	next := checkin.NextRun(checkin.ParseTimes(m.times), time.Now())
+	times := m.times()
+	next := checkin.NextRun(times, time.Now())
 	nextStr := ""
 	if !next.IsZero() {
 		nextStr = next.Format("2006-01-02 15:04")
@@ -50,7 +60,7 @@ func (m *wnflbModule) Summary() checkin.Summary {
 		LastMsg:    st.LastMsg,
 		LastAt:     st.LastCheckinAt,
 		NextAt:     nextStr,
-		Times:      m.times,
+		Times:      strings.Join(times, ","),
 	}
 }
 

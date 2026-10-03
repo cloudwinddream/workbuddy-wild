@@ -296,6 +296,11 @@ func (a *API) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 				rt.Scheduler.SetCheckinMinutes(clean)
 			}
 		}
+		// 同步第三方模块（福利吧 / 什么值得买）的调度时间源：全部签到
+		// 共用同一套签到时间。
+		if a.checkinTimesChanged != nil {
+			a.checkinTimesChanged(times)
+		}
 		log.Printf("webapi 自动签到时间已更新：%s", strings.Join(times, "、"))
 	}
 

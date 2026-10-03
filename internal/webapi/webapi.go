@@ -49,13 +49,19 @@ type Options struct {
 	StateDir   string // state 文件所在目录：登录态文件、日志都放这里
 	PublicBase string // TraeWork OAuth 回调的公开基址，如 http://公网IP:7863
 
-	// Wnflb 福利吧签到服务（nil 表示未启用）；WnflbTimes 为签到时刻表展示。
-	Wnflb      *wnflb.Service
-	WnflbTimes string
+	// Wnflb 福利吧签到服务（nil 表示未启用）。
+	Wnflb *wnflb.Service
 
-	// Smzdm 什么值得买签到服务（nil 表示未启用）；SmzdmTimes 为签到时刻表展示。
-	Smzdm      *smzdm.Service
-	SmzdmTimes string
+	// Smzdm 什么值得买签到服务（nil 表示未启用）。
+	Smzdm *smzdm.Service
+
+	// CheckinTimesFn 统一签到时间提供者：福利吧 / 什么值得买与主账号
+	// 共用同一套签到时间，模块展示与调度都从这里读（可为 nil）。
+	CheckinTimesFn func() []string
+
+	// CheckinTimesChanged 签到时间被页面修改后回调（宿主据此同步
+	// 模块调度器的时间源；可为 nil）。
+	CheckinTimesChanged func([]string)
 
 	// Notify 签到结果 Bark 推送（nil 表示未启用）。
 	Notify *notify.Bark
@@ -89,13 +95,12 @@ type API struct {
 	loginMu sync.Mutex
 	active  *loginSession // 同一时间只允许一个登录流程（与桌面端 loginBusy 语义一致）
 
-	wnflb      *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
-	wnflbTimes string         // 签到时刻表展示，如 "01:00,22:00"
+	wnflb *wnflb.Service // 福利吧签到（可为 nil 表示未启用）
+	smzdm *smzdm.Service // 什么值得买签到（可为 nil 表示未启用）
 
-	smzdm      *smzdm.Service // 什么值得买签到（可为 nil 表示未启用）
-	smzdmTimes string         // 签到时刻表展示，如 "09:00"
-
-	notify *notify.Bark // 签到结果 Bark 推送（可为 nil）
+	checkinTimesFn      func() []string // 统一签到时间提供者（模块展示用）
+	checkinTimesChanged func([]string)  // 签到时间变更回调（通知宿主）
+	notify              *notify.Bark    // 签到结果 Bark 推送（可为 nil）
 
 	catchupOnStartup bool // 启动兜底补签开关（展示用）
 
@@ -116,20 +121,20 @@ const maxEvents = 200
 // New 构建 API，并清理上次残留的登录态文件。
 func New(opts Options) *API {
 	a := &API{
-		cfg:        opts.Config,
-		cfgPath:    opts.ConfigPath,
-		runtimes:   opts.Runtimes,
-		handler:    opts.Handler,
-		version:    opts.Version,
-		stateDir:   opts.StateDir,
-		pubBase:    opts.PublicBase,
-		setListen:  opts.SetListen,
-		apiKey:     opts.Config.APIKey,
-		wnflb:      opts.Wnflb,
-		wnflbTimes: opts.WnflbTimes,
-		smzdm:      opts.Smzdm,
-		smzdmTimes: opts.SmzdmTimes,
-		notify:     opts.Notify,
+		cfg:                 opts.Config,
+		cfgPath:             opts.ConfigPath,
+		runtimes:            opts.Runtimes,
+		handler:             opts.Handler,
+		version:             opts.Version,
+		stateDir:            opts.StateDir,
+		pubBase:             opts.PublicBase,
+		setListen:           opts.SetListen,
+		apiKey:              opts.Config.APIKey,
+		wnflb:               opts.Wnflb,
+		smzdm:               opts.Smzdm,
+		checkinTimesFn:      opts.CheckinTimesFn,
+		checkinTimesChanged: opts.CheckinTimesChanged,
+		notify:              opts.Notify,
 	}
 	a.catchupOnStartup = opts.CatchupOnStartup
 	// 清理上次异常退出残留的登录态文件。
@@ -140,13 +145,13 @@ func New(opts Options) *API {
 		log.Printf("webapi: 清理残留登录态文件 %d 个", len(fps))
 	}
 	go a.loginReaper()
-	// 签到中心：注册所有签到模块（福利吧为第一个）。
+	// 签到中心：注册所有签到模块（与主账号共用统一签到时间）。
 	a.checkins = checkin.New()
 	if opts.Wnflb != nil {
-		a.checkins.Register(&wnflbModule{svc: opts.Wnflb, times: opts.WnflbTimes})
+		a.checkins.Register(&wnflbModule{svc: opts.Wnflb, timesFn: opts.CheckinTimesFn})
 	}
 	if opts.Smzdm != nil {
-		a.checkins.Register(smzdm.NewAdapter(opts.Smzdm, opts.SmzdmTimes))
+		a.checkins.Register(smzdm.NewAdapter(opts.Smzdm, opts.CheckinTimesFn))
 	}
 	return a
 }
