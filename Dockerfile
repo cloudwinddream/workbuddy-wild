@@ -52,4 +52,6 @@ EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD wget -q -O - http://127.0.0.1:7863/healthz || exit 1
 
-ENTRYPOINT ["/app/webserver"]
+# 配置文件放 /data（卷内持久化）：页面保存的签到时间/API Key 等
+# 重建容器也不会丢（曾默认写在 /app 容器层，每次重建都被重置）。
+ENTRYPOINT ["/app/webserver", "-config", "/data/config.json"]

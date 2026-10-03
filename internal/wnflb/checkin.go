@@ -73,10 +73,20 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 		return false, ""
 	}
 	credits = parseCredits(html)
+	src := "首页"
 	if credits == "" {
-		if page, err := s.client.getTextCtx(ctx, s.creditURL(), nil); err == nil {
+		page, err := s.client.getTextCtx(ctx, s.creditURL(), nil)
+		if err != nil {
+			log.Printf("wnflb: 积分页抓取失败：%v", err)
+		} else {
 			credits = parseCredits(page)
+			src = "积分页"
 		}
+	}
+	if credits == "" {
+		log.Printf("wnflb: 积分探测：首页与积分页都未解析到积分")
+	} else {
+		log.Printf("wnflb: 积分探测（%s）当前积分 %s", src, credits)
 	}
 	s.storeProbe(true, credits)
 	return true, credits

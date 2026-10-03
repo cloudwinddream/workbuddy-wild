@@ -119,6 +119,10 @@ func TestParseCredits(t *testing.T) {
 	if got := parseCredits(`<span>积分：<em>66</em></span>`); got != "66" {
 		t.Errorf("子元素布局 parseCredits = %q, want 66", got)
 	}
+	// Discuz 积分浮层布局：<em>积分</em>数字
+	if got := parseCredits(`<ul><li><em>积分</em>122</li><li><em>金钱</em>3</li></ul>`); got != "122" {
+		t.Errorf("em 布局 parseCredits = %q, want 122", got)
+	}
 }
 
 func TestDetectCaptcha(t *testing.T) {

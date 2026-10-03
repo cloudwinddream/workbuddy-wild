@@ -119,8 +119,8 @@ docker compose up -d --build
 
 首次启动没有 `config.json` 时使用"默认配置 + 环境变量"，
 **不会**把环境变量烤进文件；之后在页面上改的配置才会写回
-`config.json`（容器内为 `/app/config.json`，随容器重建丢失——
-持久化配置请继续用环境变量）。
+`config.json`（容器内为 `/data/config.json`，挂在数据卷上，
+重建容器不会丢失）。
 
 ## 六、排错
 
