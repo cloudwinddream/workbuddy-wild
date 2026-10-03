@@ -1,8 +1,11 @@
 package wnflb
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
+	"time"
 )
 
 // Checkin 执行一次签到。要求已登录；未登录返回错误。
@@ -46,15 +49,64 @@ func (s *Service) Credits() string {
 	return parseCredits(html)
 }
 
-// HomeStatus 一次请求同时返回登录态与积分（状态接口用，避免两次请求）。
+// probeTimeout 状态探测的网络超时：论坛对某些 IP 响应很慢，
+// 探测必须有短超时兜底，不能拖住签到中心列表接口。
+var probeTimeout = 10 * time.Second
+
+// probeStale 探测缓存过期阈值：超过后 Summary 触发后台刷新（不阻塞当次请求）。
+const probeStale = 2 * time.Minute
+
+// HomeStatus 实时探测：一次请求同时返回登录态与积分，并回写缓存与状态文件。
+// 只供签到后通知等后台场景；状态接口请用 CachedHomeStatus。
 func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	logged, html := s.checkLoggedIn()
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	logged, html := s.checkLoggedInCtx(ctx)
 	if !logged {
+		s.storeProbe(false, "")
 		return false, ""
 	}
-	return true, parseCredits(html)
+	credits = parseCredits(html)
+	s.storeProbe(true, credits)
+	return true, credits
+}
+
+// storeProbe 更新内存缓存并落盘探测结果。
+func (s *Service) storeProbe(loggedIn bool, credits string) {
+	s.probeMu.Lock()
+	s.probeLoggedIn, s.probeCredits, s.probeAt = loggedIn, credits, time.Now()
+	s.probeMu.Unlock()
+	s.saveProbe(loggedIn, credits)
+}
+
+// CachedHomeStatus 只读缓存的登录态与积分，绝不打网络（签到中心列表用）。
+// 缓存过期时后台异步刷新一次（单飞），当次仍立即返回旧值；
+// 冷启动先用 status.json 里上次落盘的探测结果顶上。
+func (s *Service) CachedHomeStatus() (loggedIn bool, credits string) {
+	s.probeMu.Lock()
+	loggedIn, credits, at := s.probeLoggedIn, s.probeCredits, s.probeAt
+	s.probeMu.Unlock()
+	if at.IsZero() {
+		st := s.loadStatus()
+		loggedIn, credits = st.LoggedIn, st.Credits
+	}
+	if time.Since(at) > probeStale {
+		s.refreshHomeStatusAsync()
+	}
+	return loggedIn, credits
+}
+
+// refreshHomeStatusAsync 后台刷新探测缓存（同时只跑一个）。
+func (s *Service) refreshHomeStatusAsync() {
+	if !atomic.CompareAndSwapInt32(&s.probing, 0, 1) {
+		return
+	}
+	go func() {
+		defer atomic.StoreInt32(&s.probing, 0)
+		s.HomeStatus()
+	}()
 }
 
 // EnsureLoggedIn 确保登录态：已有 Cookie 则直接用；否则用存档账号

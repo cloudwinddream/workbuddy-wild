@@ -13,11 +13,15 @@ type account struct {
 	Password string `json:"password"`
 }
 
-// status 签到状态持久化。
+// status 签到状态持久化（含最近一次首页探测的登录态与积分，
+// 供签到中心列表直接回显，不必每次实时请求论坛）。
 type status struct {
 	LastCheckinAt string `json:"last_checkin_at"`
 	LastCheckinOK bool   `json:"last_checkin_ok"`
 	LastMsg       string `json:"last_msg"`
+	LoggedIn      bool   `json:"logged_in"`
+	Credits       string `json:"credits"`
+	ProbedAt      string `json:"probed_at"`
 }
 
 func (s *Service) accountPath() string { return filepath.Join(s.dir, "account.json") }
@@ -47,13 +51,31 @@ func (s *Service) clearAccount() {
 	_ = os.Remove(s.accountPath())
 }
 
-// saveStatus 记录签到结果。
+// saveStatus 记录签到结果（合并写入，不覆盖探测字段）。
 func (s *Service) saveStatus(ok bool, msg string) {
-	raw, _ := json.Marshal(status{
-		LastCheckinAt: time.Now().Format("2006-01-02 15:04:05"),
-		LastCheckinOK: ok,
-		LastMsg:       msg,
-	})
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	st := s.loadStatus()
+	st.LastCheckinAt = time.Now().Format("2006-01-02 15:04:05")
+	st.LastCheckinOK = ok
+	st.LastMsg = msg
+	s.writeStatus(st)
+}
+
+// saveProbe 记录一次首页探测结果（合并写入，不覆盖签到字段）。
+func (s *Service) saveProbe(loggedIn bool, credits string) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	st := s.loadStatus()
+	st.LoggedIn = loggedIn
+	st.Credits = credits
+	st.ProbedAt = time.Now().Format("2006-01-02 15:04:05")
+	s.writeStatus(st)
+}
+
+// writeStatus 落盘（调用方须持 statusMu）。
+func (s *Service) writeStatus(st status) {
+	raw, _ := json.Marshal(st)
 	_ = os.WriteFile(s.statusPath(), raw, 0o600)
 }
 

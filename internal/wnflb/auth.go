@@ -1,6 +1,7 @@
 package wnflb
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -191,7 +192,12 @@ func checkLoginResult(s *Service, respHTML string) (string, bool) {
 
 // checkLoggedIn 访问首页判定登录态，返回 (是否登录, 首页HTML)。
 func (s *Service) checkLoggedIn() (bool, string) {
-	html, err := s.client.getText(s.forumURL(), nil)
+	return s.checkLoggedInCtx(context.Background())
+}
+
+// checkLoggedInCtx 同 checkLoggedIn，但受 ctx 约束（状态探测时用短超时）。
+func (s *Service) checkLoggedInCtx(ctx context.Context) (bool, string) {
+	html, err := s.client.getTextCtx(ctx, s.forumURL(), nil)
 	if err != nil {
 		return false, ""
 	}

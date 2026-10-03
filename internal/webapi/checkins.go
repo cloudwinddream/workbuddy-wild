@@ -28,7 +28,9 @@ func (m *wnflbModule) Summary() checkin.Summary {
 	st := m.svc.LoadStatusForAPI()
 	loggedIn, points := false, ""
 	if hasAccount {
-		loggedIn, points = m.svc.HomeStatus()
+		// 只读缓存，绝不在列表请求里实时打论坛（论坛慢时会拖死整个页面）；
+		// 缓存过期由服务层后台异步刷新，页面自动刷新周期内即可看到新值。
+		loggedIn, points = m.svc.CachedHomeStatus()
 	}
 	next := checkin.NextRun(checkin.ParseTimes(m.times), time.Now())
 	nextStr := ""

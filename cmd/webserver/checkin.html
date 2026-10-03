@@ -288,13 +288,14 @@
     var typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") &&
       document.querySelector(".wrap").contains(ae);
     if (typing) return;
+    // 其余区块互相独立，先并行加载，不排队等签到列表
+    loadNotify();
+    loadSettings();
+    loadAccounts();
     try {
       var r = await api("GET", "/api/checkins");
       render(r.modules || []);
     } catch (e) { if (e.message !== "401") say("加载失败：" + e.message, false); }
-    loadNotify();
-    loadSettings();
-    loadAccounts();
   }
 
   // ---- Bark 通知设置 ----

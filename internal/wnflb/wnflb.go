@@ -32,6 +32,16 @@ type Service struct {
 	client     *Client
 	challenges map[string]*Challenge // 进行中的验证码会话
 
+	// 首页状态探测缓存：Summary（状态接口）只读缓存、不打网络；
+	// 实际探测由 HomeStatus 执行并回写缓存 + status.json 落盘。
+	probeMu       sync.Mutex
+	probeAt       time.Time // 上次探测完成时间
+	probeLoggedIn bool
+	probeCredits  string
+	probing       int32 // 原子标志：后台刷新进行中（单飞）
+
+	statusMu sync.Mutex // status.json 的读-改-写串行化
+
 	notifier *notify.Bark // 签到结果推送（可为 nil 表示不推送）
 }
 

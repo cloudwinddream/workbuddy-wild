@@ -1,6 +1,7 @@
 package wnflb
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -112,7 +113,13 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 
 // getText GET 并按 UTF-8/GBK 解码为文本。
 func (c *Client) getText(url string, headers map[string]string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	return c.getTextCtx(context.Background(), url, headers)
+}
+
+// getTextCtx 同 getText，但受 ctx 超时/取消约束（状态探测用短超时，
+// 避免论坛响应慢时拖死调用方）。
+func (c *Client) getTextCtx(ctx context.Context, url string, headers map[string]string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
