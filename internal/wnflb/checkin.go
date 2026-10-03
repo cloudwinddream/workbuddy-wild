@@ -77,33 +77,49 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	credits = parseCredits(html)
 	src := "首页"
 	if credits == "" {
-		// 候选页依次尝试：版块页（用户实测有积分锚点）→ 签到列表页 → 积分页。
-		// （个人空间/资料页在本论坛会重定向回首页，已实测无效，不再试。）
+		// 候选页依次尝试（顺序与现成脚本一致：签到列表页提 UID →
+		// 个人空间页 → 个人资料页），版块页与积分页兜底。
 		type cand struct{ name, url string }
-		cands := []cand{{"积分页", s.creditURL()}}
-		if link := s.firstBoardLink(html); link != "" {
-			cands = append([]cand{{"版块页", link}, {"签到列表页", s.checkinListURL()}}, cands...)
-		} else {
-			cands = append([]cand{{"签到列表页", s.checkinListURL()}}, cands...)
-		}
-		for _, cd := range cands {
-			page, err := s.client.getTextCtx(ctx, cd.url, nil)
-			if err != nil {
-				log.Printf("wnflb: 积分探测：%s抓取失败：%v", cd.name, err)
-				continue
-			}
+		var cands []cand
+		uid := ""
+		if page, status, final, err := s.client.getDiag(ctx, s.checkinListURL(), nil); err == nil {
 			if c := parseCredits(page); c != "" {
-				credits, src = c, cd.name
-				break
-			}
-			// 诊断：页面里有"积分"却没解析出来时，打印其上下文供补模式。
-			if i := strings.Index(page, "积分"); i >= 0 {
-				lo := max(0, i-50)
-				hi := min(len(page), i+110)
-				snip := strings.ReplaceAll(page[lo:hi], "\n", " ")
-				log.Printf("wnflb: 积分探测：%s未解析，积分上下文：…%s…", cd.name, snip)
+				credits, src = c, "签到列表页"
 			} else {
-				log.Printf("wnflb: 积分探测：%s未解析（%d 字节，无积分字样）", cd.name, len(page))
+				uid = extractUID(page)
+				log.Printf("wnflb: 积分探测：签到列表页 %d %s 未解析（uid=%q）", status, shortURL(final), uid)
+			}
+		} else {
+			log.Printf("wnflb: 积分探测：签到列表页抓取失败：%v", err)
+		}
+		if credits == "" {
+			if uid != "" {
+				cands = append(cands,
+					cand{"个人空间页", s.spaceURL(uid)},
+					cand{"个人资料页", s.profileURL(uid)})
+			}
+			if link := s.firstBoardLink(html); link != "" {
+				cands = append(cands, cand{"版块页", link})
+			}
+			cands = append(cands, cand{"积分页", s.creditURL()})
+			for _, cd := range cands {
+				page, status, final, err := s.client.getDiag(ctx, cd.url, nil)
+				if err != nil {
+					log.Printf("wnflb: 积分探测：%s抓取失败：%v", cd.name, err)
+					continue
+				}
+				if c := parseCredits(page); c != "" {
+					credits, src = c, cd.name
+					break
+				}
+				log.Printf("wnflb: 积分探测：%s %d %s 未解析（%d 字节，标题：%s）",
+					cd.name, status, shortURL(final), len(page), pageTitle(page))
+				if i := strings.Index(page, "积分"); i >= 0 {
+					lo := max(0, i-50)
+					hi := min(len(page), i+110)
+					snip := strings.ReplaceAll(page[lo:hi], "\n", " ")
+					log.Printf("wnflb: 积分探测：%s积分上下文：…%s…", cd.name, snip)
+				}
 			}
 		}
 	}
@@ -114,6 +130,25 @@ func (s *Service) HomeStatus() (loggedIn bool, credits string) {
 	}
 	s.storeProbe(true, credits)
 	return true, credits
+}
+
+// shortURL 只留路径部分打日志（避免整串 URL 刷屏）。
+func shortURL(u string) string {
+	if i := strings.Index(u, "://"); i >= 0 {
+		if j := strings.Index(u[i+3:], "/"); j >= 0 {
+			return u[i+3+j:]
+		}
+		return u
+	}
+	return u
+}
+
+// pageTitle 提取页面 <title>（诊断用，认出实际拿到的是什么页）。
+func pageTitle(html string) string {
+	if m := reTitle.FindStringSubmatch(html); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return "(无标题)"
 }
 
 // firstBoardLink 从论坛首页提取第一个版块页链接（绝对地址）。
@@ -128,6 +163,16 @@ func (s *Service) firstBoardLink(html string) string {
 // checkinListURL 签到列表页地址（插件页，带完整页眉）。
 func (s *Service) checkinListURL() string {
 	return s.baseURL + "/plugin.php?id=fx_checkin:list"
+}
+
+// spaceURL 个人空间页地址（统计信息块含积分）。
+func (s *Service) spaceURL(uid string) string {
+	return s.baseURL + "/space-uid-" + uid + ".html"
+}
+
+// profileURL 个人资料页地址（同为积分候选页）。
+func (s *Service) profileURL(uid string) string {
+	return s.baseURL + "/home.php?mod=space&uid=" + uid + "&do=profile"
 }
 
 // creditURL 积分页地址：该页必有当前积分（论坛首页模板可能不渲染）。

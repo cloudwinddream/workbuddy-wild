@@ -10,6 +10,9 @@ var (
 	reLoginhash     = regexp.MustCompile(`loginhash=([A-Za-z0-9]+)`)
 	reDiscuzUID     = regexp.MustCompile(`discuz_uid\s*=\s*'(\d+)'`)
 	reBoardLink     = regexp.MustCompile(`href="(forum-\d+-1\.html)"`)
+	reTitle         = regexp.MustCompile(`(?i)<title>([^<]*)</title>`)
+	reSpaceUID      = regexp.MustCompile(`mod=space&amp;uid=(\d+)`)
+	reSpaceUIDPath  = regexp.MustCompile(`space-uid-(\d+)\.html`)
 	reAuth          = regexp.MustCompile(`name="auth"\s+value="([A-Za-z0-9%_./=+]+)"`)
 	reUpdateseccode = regexp.MustCompile(`updateseccode\(\s*['"]([A-Za-z0-9]+)['"]`)
 	reSeccodeSpan   = regexp.MustCompile(`id="seccode_([A-Za-z0-9]+)"`)
@@ -164,10 +167,22 @@ var reCredits = []*regexp.Regexp{
 	regexp.MustCompile(`>积分\s*([\d,]+)<`),
 	// 标签与数字相邻：<em>积分</em>122 / 积分：</em>122
 	regexp.MustCompile(`积分\s*[：:]?\s*</[^>]+>\s*([\d,]+)`),
+	// 下划线分隔写法：_积分_ 122
+	regexp.MustCompile(`_积分_\s*([\d,]+)`),
 	// 表格布局：<th>积分</th><td>1234</td>
 	regexp.MustCompile(`积分\s*</[^>]+>\s*<[^>]+>\s*([\d,]+)`),
 	// 积分锚点后跟子元素：积分：<span>1234</span>
 	regexp.MustCompile(`积分\s*[：:]\s*<[^>]+>\s*([\d,]+)`),
+}
+
+// extractUID 从页面提取当前用户 ID（空间链接 / discuz_uid 变量 / 空间路径）。
+func extractUID(html string) string {
+	for _, re := range []*regexp.Regexp{reSpaceUID, reDiscuzUID, reSpaceUIDPath} {
+		if m := re.FindStringSubmatch(html); m != nil && m[1] != "0" {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 // parseCredits 从已登录首页 HTML 解析当前积分，解析不到返回 ""。

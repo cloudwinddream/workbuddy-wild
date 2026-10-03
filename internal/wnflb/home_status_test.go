@@ -96,18 +96,21 @@ func TestProbeResultPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// 论坛首页不渲染积分（用户实测要点进版块页才有）：探测应提取
-// 首页第一个版块链接（forum-2-1.html）去版块页取积分。
+// 积分探测链（与现成脚本一致）：签到列表页提取 UID →
+// 个人空间页取积分（统计信息块 <em>积分</em>122）。
 func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 	withProbeTimeout(t, 10*time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch {
+		case strings.Contains(r.URL.String(), "fx_checkin:list"):
+			// 签到列表页：无积分，但能提取 UID
+			_, _ = w.Write([]byte(`<html><head><title>签到</title></head><script>var discuz_uid = '9527';</script><body>签到列表</body></html>`))
+		case strings.Contains(r.URL.Path, "space-uid-9527.html"):
+			// 个人空间页：统计信息块
+			_, _ = w.Write([]byte(`<html><head><title>个人空间</title></head><body><ul><li><em>积分</em> 888</li></ul></body></html>`))
 		case strings.Contains(r.URL.Path, "forum-2-1.html"):
-			// 版块页：带积分锚点的页眉（用户实测原样）
-			_, _ = w.Write([]byte(`<html><body><a href="home.php?mod=spacecp&amp;ac=credit&amp;showcredit=1" id="extcreditmenu">积分: 888</a></body></html>`))
-		case r.URL.Query().Get("ac") == "credit":
-			_, _ = w.Write([]byte(`<html><body><table><tr><th>积分</th><td>122</td></tr></table></body></html>`))
+			_, _ = w.Write([]byte(`<html><body><a id="extcreditmenu">积分: 111</a></body></html>`))
 		default:
 			// 论坛首页：已登录、含版块链接，但没有积分
 			_, _ = w.Write([]byte(`<html><script>var discuz_uid = '9527';</script><body><a href="forum-2-1.html">版块</a></body></html>`))
@@ -118,6 +121,18 @@ func TestHomeStatusFallsBackToCreditPage(t *testing.T) {
 	s := New(t.TempDir(), srv.URL)
 	loggedIn, credits := s.HomeStatus()
 	if !loggedIn || credits != "888" {
-		t.Fatalf("版块页回退 = (%v, %q), want (true, 888)", loggedIn, credits)
+		t.Fatalf("空间页回退 = (%v, %q), want (true, 888)", loggedIn, credits)
+	}
+}
+
+func TestExtractUID(t *testing.T) {
+	if got := extractUID(`<a href="home.php?mod=space&amp;uid=42">我</a>`); got != "42" {
+		t.Errorf("extractUID = %q, want 42", got)
+	}
+	if got := extractUID(`<script>var discuz_uid = '77';</script>`); got != "77" {
+		t.Errorf("extractUID = %q, want 77", got)
+	}
+	if got := extractUID(`<script>var discuz_uid = '0';</script>`); got != "" {
+		t.Errorf("游客应为空，got %q", got)
 	}
 }

@@ -119,23 +119,34 @@ func (c *Client) getText(url string, headers map[string]string) (string, error) 
 // getTextCtx 同 getText，但受 ctx 超时/取消约束（状态探测用短超时，
 // 避免论坛响应慢时拖死调用方）。
 func (c *Client) getTextCtx(ctx context.Context, url string, headers map[string]string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	body, _, _, err := c.getDiag(ctx, url, headers)
+	return body, err
+}
+
+// getDiag 探测专用抓取：额外返回 HTTP 状态与重定向后的最终 URL，
+// 用于日志定位"实际拿到了什么页面"。
+func (c *Client) getDiag(ctx context.Context, rawurl string, headers map[string]string) (body string, status int, finalURL string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
 	if err != nil {
-		return "", err
+		return "", 0, "", err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	resp, err := c.do(req)
 	if err != nil {
-		return "", err
+		return "", 0, "", err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return "", err
+		return "", resp.StatusCode, "", err
 	}
-	return decodeBody(raw), nil
+	final := rawurl
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL.String()
+	}
+	return decodeBody(raw), resp.StatusCode, final, nil
 }
 
 // postForm POST 表单并解码为文本。
