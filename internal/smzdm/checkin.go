@@ -1,7 +1,9 @@
 package smzdm
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -48,12 +50,30 @@ func (r CheckinResult) Summary() string {
 }
 
 // PerformDailyCheckin 执行每日签到。
+//
+// 返回空结果（服务端 error_code=0 但 data 无任何签到字段）视为未真正
+// 签到：历史上这里会拼出"签到成功 · 第0天 · +0金币"的假成功，卡片和
+// 推送都报喜、APP 里却没签上。现在显式报错，让问题暴露出来。
 func PerformDailyCheckin(c *Client) (CheckinResult, error) {
 	data, err := c.Post("/checkin", nil)
 	if err != nil {
 		return CheckinResult{}, err
 	}
-	return parseCheckinResult(data), nil
+	res := parseCheckinResult(data)
+	log.Printf("smzdm: 签到接口返回 %+v", res)
+	if res.ConsecutiveDays == 0 && res.GoldEarned == 0 && res.PointsEarned == 0 && res.ExpEarned == 0 {
+		return CheckinResult{}, errors.New("签到接口返回空结果（未真正签到，Cookie 可能已失效，请重新抓取）")
+	}
+	return res, nil
+}
+
+// IsAlreadySigned 服务端以业务错误表示"今日已签到"时识别为已签。
+func IsAlreadySigned(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return strings.Contains(ae.Msg, "已签到") || strings.Contains(ae.Msg, "已经签到")
 }
 
 // FetchNormalReward 获取今日签到普通奖励（尽力而为）。

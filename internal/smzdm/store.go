@@ -65,12 +65,26 @@ func New(dir, baseURL string) *Service {
 func (s *Service) cookiePath() string { return filepath.Join(s.dir, "cookie.json") }
 func (s *Service) statusPath() string { return filepath.Join(s.dir, "status.json") }
 
+// hookClient 给客户端挂上 sess 轮换回调：新 Cookie 自动回写存档，
+// 避免旧 sess 过期后每天静默签到失败。
+func (s *Service) hookClient(c *Client) {
+	c.SetCookieUpdateHook(func(newCookie string) {
+		raw, _ := json.Marshal(credential{
+			Cookie:  newCookie,
+			SmzdmID: c.SmzdmID(),
+			SavedAt: time.Now().Format("2006-01-02 15:04:05"),
+		})
+		_ = os.WriteFile(s.cookiePath(), raw, 0o600)
+	})
+}
+
 // SaveCookie 保存 Cookie（网页提交/环境变量导入时调用）。
 func (s *Service) SaveCookie(cookie string) error {
 	c, err := NewClient(cookie, s.baseURL)
 	if err != nil {
 		return err
 	}
+	s.hookClient(c)
 	raw, _ := json.Marshal(credential{
 		Cookie:  cookie,
 		SmzdmID: c.SmzdmID(),
@@ -157,6 +171,7 @@ func (s *Service) getClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.hookClient(c)
 	s.client = c
 	return c, nil
 }
@@ -200,6 +215,12 @@ func (s *Service) AutoCheckin() string {
 	}
 	res, err := PerformDailyCheckin(c)
 	if err != nil {
+		if IsAlreadySigned(err) {
+			msg := "今日已签到（服务端确认）"
+			s.saveStatus(true, msg, 0)
+			s.notifyResult(true, msg)
+			return msg
+		}
 		msg := "签到失败：" + err.Error()
 		s.saveStatus(false, msg, 0)
 		s.notifyResult(false, msg)

@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +43,42 @@ type Client struct {
 	smzdmID     string
 	securityKey string
 	iphone      bool
+
+	cookieMu       sync.Mutex
+	onCookieUpdate func(string) // 服务端轮换 sess 后回调（存档更新）
+}
+
+// SetCookieUpdateHook 注册 Cookie 更新回调（服务端轮换 sess 时触发）。
+func (c *Client) SetCookieUpdateHook(f func(string)) { c.onCookieUpdate = f }
+
+var reSessPair = regexp.MustCompile(`(^|;\s*)sess=[^;]*`)
+
+// captureRotatedSess 保存服务端轮换后的 sess：旧 sess 一旦过期签到
+// 就会静默失效，这里把新值同步回内存与存档。
+func (c *Client) captureRotatedSess(resp *http.Response) {
+	for _, ck := range resp.Cookies() {
+		if ck.Name != "sess" || ck.Value == "" {
+			continue
+		}
+		c.cookieMu.Lock()
+		if c.cookies["sess"] == ck.Value {
+			c.cookieMu.Unlock()
+			return
+		}
+		c.cookies["sess"] = ck.Value
+		if reSessPair.MatchString(c.cookie) {
+			c.cookie = reSessPair.ReplaceAllString(c.cookie, "${1}sess="+ck.Value)
+		} else {
+			c.cookie = "sess=" + ck.Value + "; " + c.cookie
+		}
+		updated := c.cookie
+		c.cookieMu.Unlock()
+		log.Printf("smzdm: 服务端轮换了 sess，已同步更新 Cookie")
+		if c.onCookieUpdate != nil {
+			c.onCookieUpdate(updated)
+		}
+		return
+	}
 }
 
 // NewClient 用 Cookie 字符串创建客户端。Cookie 须包含 sess 字段；
@@ -158,6 +197,7 @@ func (c *Client) Post(path string, extra map[string]string) (map[string]any, err
 		return nil, err
 	}
 	defer resp.Body.Close()
+	c.captureRotatedSess(resp)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, err
