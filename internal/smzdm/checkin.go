@@ -71,7 +71,15 @@ func FetchCheckinProfile(c *Client) (CheckinResult, error) {
 // 报错（多为登录过期/风控，属真实失败，必须暴露）。
 func PerformDailyCheckin(c *Client) (string, CheckinResult, error) {
 	signErr := c.RobotSign()
+	if signErr == nil {
+		log.Printf("smzdm: robot 签到成功")
+	} else {
+		log.Printf("smzdm: robot 签到未成：%v", signErr)
+	}
 	prof, profErr := FetchCheckinProfile(c)
+	if profErr != nil {
+		log.Printf("smzdm: 签到档案拉取失败：%v", profErr)
+	}
 	switch {
 	case signErr == nil:
 		if profErr == nil {
