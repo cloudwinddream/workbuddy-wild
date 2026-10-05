@@ -43,28 +43,49 @@ func parseCheckinResult(data map[string]any) CheckinResult {
 	}
 }
 
-// Summary 生成签到结果摘要。
+// Summary 生成档案摘要（字段均为余额/累计类数据，如实标注，不冒充今日所得）。
 func (r CheckinResult) Summary() string {
-	return fmt.Sprintf("签到成功 · 第%d天 · +%d金币 +%d积分 +%d经验",
+	return fmt.Sprintf("连签第%d天 · 金币%d · 总积分%d · 总经验%d",
 		r.ConsecutiveDays, r.GoldEarned, r.PointsEarned, r.ExpEarned)
 }
 
-// PerformDailyCheckin 执行每日签到。
-//
-// 返回空结果（服务端 error_code=0 但 data 无任何签到字段）视为未真正
-// 签到：历史上这里会拼出"签到成功 · 第0天 · +0金币"的假成功，卡片和
-// 推送都报喜、APP 里却没签上。现在显式报错，让问题暴露出来。
-func PerformDailyCheckin(c *Client) (CheckinResult, error) {
+// FetchCheckinProfile 拉取签到档案（连签天数、金币余额、总积分等）。
+// 注意：该接口只读档案、并不签到（实测金币余额多日不变即为证据）。
+func FetchCheckinProfile(c *Client) (CheckinResult, error) {
 	data, err := c.Post("/checkin", nil)
 	if err != nil {
 		return CheckinResult{}, err
 	}
 	res := parseCheckinResult(data)
-	log.Printf("smzdm: 签到接口返回 %+v", res)
+	log.Printf("smzdm: 签到档案 %+v", res)
 	if res.ConsecutiveDays == 0 && res.GoldEarned == 0 && res.PointsEarned == 0 && res.ExpEarned == 0 {
-		return CheckinResult{}, errors.New("签到接口返回空结果（未真正签到，Cookie 可能已失效，请重新抓取）")
+		return CheckinResult{}, errors.New("签到档案为空（Cookie 可能已失效，请重新抓取）")
 	}
 	return res, nil
+}
+
+// PerformDailyCheckin 真正执行每日签到并返回（结果文案, 签到档案, 错误）。
+//
+// 签到走 robot 流程（/robot/token → /checkin，以其 error_msg 为准）；
+// 档案仅用于展示连签天数与金币余额。robot 在 token 阶段失败时直接
+// 报错（多为登录过期/风控，属真实失败，必须暴露）。
+func PerformDailyCheckin(c *Client) (string, CheckinResult, error) {
+	signErr := c.RobotSign()
+	prof, profErr := FetchCheckinProfile(c)
+	switch {
+	case signErr == nil:
+		if profErr == nil {
+			return "签到成功 · " + prof.Summary(), prof, nil
+		}
+		return "签到成功", prof, nil
+	case IsAlreadySigned(signErr):
+		if profErr == nil {
+			return "今日已签到 · " + prof.Summary(), prof, nil
+		}
+		return "今日已签到", prof, nil
+	default:
+		return "", prof, signErr
+	}
 }
 
 // IsAlreadySigned 服务端以业务错误表示"今日已签到"时识别为已签。
@@ -136,11 +157,11 @@ func ClaimExtraReward(c *Client) (bool, error) {
 // RunCheckinFlow 执行完整签到流程：签到 → 普通奖励 → 连续签到额外奖励。
 // 返回人类可读的结果摘要。
 func RunCheckinFlow(c *Client) (string, error) {
-	res, err := PerformDailyCheckin(c)
+	head, _, err := PerformDailyCheckin(c)
 	if err != nil {
 		return "", err
 	}
-	parts := []string{res.Summary()}
+	parts := []string{head}
 	if reward := FetchNormalReward(c); reward != "" {
 		parts = append(parts, "奖励："+reward)
 	}

@@ -28,7 +28,14 @@ func (a *Adapter) Summary() checkin.Summary {
 	cfg := a.svc.Configured()
 	points := ""
 	if st.LastGold > 0 {
-		points = fmt.Sprintf("+%d", st.LastGold)
+		points = fmt.Sprintf("%d", st.LastGold)
+	}
+	detail := ""
+	if st.LastDays > 0 {
+		detail = fmt.Sprintf("连签第%d天", st.LastDays)
+		if st.LastPoints > 0 {
+			detail += fmt.Sprintf(" · 总积分%d", st.LastPoints)
+		}
 	}
 	var times []string
 	if a.timesFn != nil {
@@ -48,6 +55,7 @@ func (a *Adapter) Summary() checkin.Summary {
 		Username:   a.svc.SmzdmID(),
 		Points:     points,
 		PointsName: "金币",
+		Detail:     detail,
 		LastOK:     st.LastCheckinOK,
 		LastMsg:    st.LastMsg,
 		LastAt:     st.LastCheckinAt,

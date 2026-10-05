@@ -187,11 +187,16 @@ func (c *Client) Post(path string, extra map[string]string) (map[string]any, err
 	for k, v := range c.signedForm(extra) {
 		form.Set(k, v)
 	}
+	return c.doPost(path, form, c.appHeaders())
+}
+
+// doPost 发送表单 POST 并拆信封（error_code != 0 转 APIError）。
+func (c *Client) doPost(path string, form url.Values, headers http.Header) (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
-	req.Header = c.appHeaders()
+	req.Header = headers
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -223,4 +228,83 @@ func (c *Client) Post(path string, extra map[string]string) (map[string]any, err
 		payload.Data = map[string]any{}
 	}
 	return payload.Data, nil
+}
+
+// ---------------------------------------------------------------------------
+// robot 签到流程（社区验证的真正签到路径）
+//
+// 实测教训：新版 APP 协议的 POST /checkin 只返回账号档案（连签天数、
+// 金币余额、总积分等），并不真正签到——金币余额多日不变即为证据。
+// 青龙脚本（Sitoi / ql-script-hub）验证的签到路径是：
+// 先 POST /robot/token 换临时 token，再带固定 sk POST /checkin，
+// 成败以该响应的 error_code / error_msg 为准。
+// ---------------------------------------------------------------------------
+
+const (
+	robotVersion = "10.4.1"
+	robotSK      = "ierkM0OZZbsuBKLoAgQ6OJneLMXBQXmzX+LXkNTuKch8Ui2jGlahuFyWIzBiDq/L"
+	robotUA      = "smzdm_android_V10.4.1 rv:841 (Redmi;Android10;zh)smzdmapp"
+)
+
+var robotProfile = AppProfile{Version: robotVersion, SignKey: "apr1$AwP!wRRT$gJ/q.X24poeBInlUJC"}
+
+// robotStageError 标记 robot 流程失败阶段（token / sign）。
+type robotStageError struct {
+	stage string
+	err   error
+}
+
+func (e *robotStageError) Error() string { return e.err.Error() }
+func (e *robotStageError) Unwrap() error { return e.err }
+
+func (c *Client) robotHeaders() http.Header {
+	h := http.Header{}
+	h.Set("User-Agent", robotUA)
+	h.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.Set("Cookie", c.cookie)
+	return h
+}
+
+func (c *Client) robotToken() (string, error) {
+	fields := map[string]string{
+		"f": "android", "v": robotVersion, "weixin": "1",
+		"time": fmt.Sprintf("%d", time.Now().UnixMilli()),
+	}
+	fields["sign"] = ComputeRequestSignature(fields, robotProfile)
+	data, err := c.doPost("/robot/token", formOf(fields), c.robotHeaders())
+	if err != nil {
+		return "", &robotStageError{"token", err}
+	}
+	tok, _ := data["token"].(string)
+	if tok == "" {
+		return "", &robotStageError{"token", fmt.Errorf("robot/token 未返回 token")}
+	}
+	return tok, nil
+}
+
+// RobotSign 执行真正的每日签到：成功返回 nil；服务端以业务错误
+// 表示"今日已签到"时返回对应的 APIError（用 IsAlreadySigned 识别）。
+func (c *Client) RobotSign() error {
+	tok, err := c.robotToken()
+	if err != nil {
+		return err
+	}
+	fields := map[string]string{
+		"f": "android", "v": robotVersion, "weixin": "1",
+		"sk": robotSK, "token": tok,
+		"time": fmt.Sprintf("%d", time.Now().UnixMilli()),
+	}
+	fields["sign"] = ComputeRequestSignature(fields, robotProfile)
+	if _, err := c.doPost("/checkin", formOf(fields), c.robotHeaders()); err != nil {
+		return &robotStageError{"sign", err}
+	}
+	return nil
+}
+
+func formOf(fields map[string]string) url.Values {
+	form := url.Values{}
+	for k, v := range fields {
+		form.Set(k, v)
+	}
+	return form
 }

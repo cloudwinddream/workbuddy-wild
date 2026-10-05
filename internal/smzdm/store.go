@@ -24,7 +24,9 @@ type status struct {
 	LastCheckinAt string `json:"last_checkin_at"`
 	LastCheckinOK bool   `json:"last_checkin_ok"`
 	LastMsg       string `json:"last_msg"`
-	LastGold      int    `json:"last_gold"` // 上次签到获得的金币
+	LastGold      int    `json:"last_gold"`   // 金币余额（档案值）
+	LastDays      int    `json:"last_days"`   // 连签天数（档案值）
+	LastPoints    int    `json:"last_points"` // 总积分（档案值）
 }
 
 // Service 是什么值得买签到服务。
@@ -182,14 +184,18 @@ type errorString string
 
 func (e errorString) Error() string { return string(e) }
 
-// saveStatus 记录签到结果。
-func (s *Service) saveStatus(ok bool, msg string, gold int) {
-	raw, _ := json.Marshal(status{
-		LastCheckinAt: time.Now().Format("2006-01-02 15:04:05"),
-		LastCheckinOK: ok,
-		LastMsg:       msg,
-		LastGold:      gold,
-	})
+// saveStatus 记录签到结果（prof 为签到档案，失败时传空值保留旧展示）。
+func (s *Service) saveStatus(ok bool, msg string, prof CheckinResult) {
+	st := s.loadStatus()
+	st.LastCheckinAt = time.Now().Format("2006-01-02 15:04:05")
+	st.LastCheckinOK = ok
+	st.LastMsg = msg
+	if prof != (CheckinResult{}) {
+		st.LastGold = prof.GoldEarned
+		st.LastDays = prof.ConsecutiveDays
+		st.LastPoints = prof.PointsEarned
+	}
+	raw, _ := json.Marshal(st)
 	_ = os.WriteFile(s.statusPath(), raw, 0o600)
 }
 
@@ -209,25 +215,18 @@ func (s *Service) AutoCheckin() string {
 	c, err := s.getClient()
 	if err != nil {
 		msg := "未配置 Cookie，请先在网页填入"
-		s.saveStatus(false, msg, 0)
+		s.saveStatus(false, msg, CheckinResult{})
 		s.notifyResult(false, msg)
 		return msg
 	}
-	res, err := PerformDailyCheckin(c)
+	head, prof, err := PerformDailyCheckin(c)
 	if err != nil {
-		if IsAlreadySigned(err) {
-			msg := "今日已签到（服务端确认）"
-			s.saveStatus(true, msg, 0)
-			s.notifyResult(true, msg)
-			return msg
-		}
 		msg := "签到失败：" + err.Error()
-		s.saveStatus(false, msg, 0)
+		s.saveStatus(false, msg, CheckinResult{})
 		s.notifyResult(false, msg)
 		return msg
 	}
-	parts := res.Summary()
-	summary := parts
+	summary := head
 	if reward := FetchNormalReward(c); reward != "" {
 		summary += "；奖励：" + reward
 	}
@@ -236,7 +235,7 @@ func (s *Service) AutoCheckin() string {
 	} else if claimed {
 		summary += "；连续签到额外奖励已领取"
 	}
-	s.saveStatus(true, summary, res.GoldEarned)
+	s.saveStatus(true, summary, prof)
 	s.notifyResult(true, summary)
 	return summary
 }
