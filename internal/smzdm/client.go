@@ -231,74 +231,75 @@ func (c *Client) doPost(path string, form url.Values, headers http.Header) (map[
 }
 
 // ---------------------------------------------------------------------------
-// robot 签到流程（社区验证的真正签到路径）
+// APP 签到（hex-ci/smzdm_script 验证的真正签到原方）
 //
-// 实测教训：新版 APP 协议的 POST /checkin 只返回账号档案（连签天数、
-// 金币余额、总积分等），并不真正签到——金币余额多日不变即为证据。
-// 青龙脚本（Sitoi / ql-script-hub）验证的签到路径是：
-// 先 POST /robot/token 换临时 token，再带固定 sk POST /checkin，
-// 成败以该响应的 error_code / error_msg 为准。
+// 实测教训：新版协议（token=sess+SK / iPhone）与 robot 流程的
+// POST /checkin 都只返回账号档案、并不真正签到（金币余额多日
+// 不变、APP 里仍可再签）。hex-ci（2026 仍在维护）的原方是：
+// Cookie 强制改成安卓身份（v10.4.26），签到表单额外带
+// touchstone_event 与 captcha 字段，成败看 error_code。
 // ---------------------------------------------------------------------------
 
 const (
-	robotVersion = "10.4.1"
-	robotSK      = "ierkM0OZZbsuBKLoAgQ6OJneLMXBQXmzX+LXkNTuKch8Ui2jGlahuFyWIzBiDq/L"
-	robotUA      = "smzdm_android_V10.4.1 rv:841 (Redmi;Android10;zh)smzdmapp"
+	appSignVersion     = "10.4.26"
+	appSignVersionCode = "866"
+	appSignUA          = "smzdm_android_V10.4.26 rv:866 (Redmi Note 3;Android10.0;zh)smzdmapp"
 )
 
-var robotProfile = AppProfile{Version: robotVersion, SignKey: "apr1$AwP!wRRT$gJ/q.X24poeBInlUJC"}
+var appSignProfile = AppProfile{Version: appSignVersion, VersionCode: appSignVersionCode, SignKey: "apr1$AwP!wRRT$gJ/q.X24poeBInlUJC", SKKey: "geZm53XAspb02exN"}
 
-// robotStageError 标记 robot 流程失败阶段（token / sign）。
-type robotStageError struct {
-	stage string
-	err   error
+// androidifyCookie 把 Cookie 改成安卓身份（对齐 hex-ci 的处理：
+// 平台与版本字段统一改写为 android / 10.4.26，只改已存在的键）。
+func androidifyCookie(raw string) string {
+	s := strings.Replace(raw, "iphone", "android", 1)
+	s = strings.Replace(s, "iPhone", "Android", 1)
+	for k, v := range map[string]string{
+		"smzdm_version":             appSignVersion,
+		"device_smzdm_version":      appSignVersion,
+		"v":                         appSignVersion,
+		"device_smzdm_version_code": appSignVersionCode,
+		"device_system_version":     "10.0",
+		"device_type":               "Android",
+		"device_smzdm":              "android",
+		"device_name":               "Android",
+	} {
+		re := regexp.MustCompile(`(^|;\s*)` + k + `=[^;]*`)
+		s = re.ReplaceAllString(s, "${1}"+k+"="+v)
+	}
+	return s
 }
 
-func (e *robotStageError) Error() string { return e.err.Error() }
-func (e *robotStageError) Unwrap() error { return e.err }
-
-func (c *Client) robotHeaders() http.Header {
+func (c *Client) appSignHeaders() http.Header {
 	h := http.Header{}
-	h.Set("User-Agent", robotUA)
+	h.Set("User-Agent", appSignUA)
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.Set("Cookie", c.cookie)
+	h.Set("Accept", "*/*")
+	h.Set("Accept-Language", "zh-Hans-CN;q=1")
+	h.Set("Cookie", androidifyCookie(c.cookie))
+	h.Set("request_key", fmt.Sprintf("%018d", rand.Int63n(1e18)))
 	return h
 }
 
-func (c *Client) robotToken() (string, error) {
-	fields := map[string]string{
-		"f": "android", "v": robotVersion, "weixin": "1",
-		"time": fmt.Sprintf("%d", time.Now().UnixMilli()),
-	}
-	fields["sign"] = ComputeRequestSignature(fields, robotProfile)
-	data, err := c.doPost("/robot/token", formOf(fields), c.robotHeaders())
-	if err != nil {
-		return "", &robotStageError{"token", err}
-	}
-	tok, _ := data["token"].(string)
-	if tok == "" {
-		return "", &robotStageError{"token", fmt.Errorf("robot/token 未返回 token")}
-	}
-	return tok, nil
-}
-
-// RobotSign 执行真正的每日签到：成功返回 nil；服务端以业务错误
-// 表示"今日已签到"时返回对应的 APIError（用 IsAlreadySigned 识别）。
-func (c *Client) RobotSign() error {
-	tok, err := c.robotToken()
-	if err != nil {
-		return err
+// AppSign 执行真正的每日签到，返回签到响应 data（内含档案字段）。
+// 服务端以业务错误表示"今日已签到"时返回 APIError（IsAlreadySigned 识别）。
+func (c *Client) AppSign() (map[string]any, error) {
+	sk := "1" // hex-ci 原方：算不出 SK 时就发 "1"
+	if g, err := GenerateSecurityKey(c.smzdmID, c.deviceID, appSignProfile); err == nil {
+		sk = g
 	}
 	fields := map[string]string{
-		"f": "android", "v": robotVersion, "weixin": "1",
-		"sk": robotSK, "token": tok,
-		"time": fmt.Sprintf("%d", time.Now().UnixMilli()),
+		"weixin":           "1",
+		"basic_v":          "0",
+		"f":                "android",
+		"v":                appSignVersion,
+		"time":             fmt.Sprintf("%d000", time.Now().Unix()),
+		"touchstone_event": "",
+		"sk":               sk,
+		"token":            c.cookies["sess"],
+		"captcha":          "",
 	}
-	fields["sign"] = ComputeRequestSignature(fields, robotProfile)
-	if _, err := c.doPost("/checkin", formOf(fields), c.robotHeaders()); err != nil {
-		return &robotStageError{"sign", err}
-	}
-	return nil
+	fields["sign"] = ComputeRequestSignature(fields, appSignProfile)
+	return c.doPost("/checkin", formOf(fields), c.appSignHeaders())
 }
 
 func formOf(fields map[string]string) url.Values {

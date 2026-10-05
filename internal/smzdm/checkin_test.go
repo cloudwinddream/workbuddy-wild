@@ -8,13 +8,12 @@ import (
 	"testing"
 )
 
-// fakeAPI 模拟 smzdm 接口：/robot/token 换 token、/checkin 按 token
-// 区分 robot 签到（token=RT1）与档案读取，其余路径回档案数据。
+// fakeAPI 模拟 smzdm 接口：/checkin 按是否带 touchstone_event 字段
+// 区分 APP 签到与档案读取。
 type fakeAPI struct {
-	profile  map[string]any
-	tokenErr string // 非空时 /robot/token 返回该业务错误
-	signErr  string // 非空时 robot /checkin 返回该业务错误
-	setSess  string // 非空时在档案响应里轮换 sess
+	profile map[string]any
+	signErr string // 非空时 APP 签到返回该业务错误
+	setSess string // 非空时在档案响应里轮换 sess
 }
 
 func (f *fakeAPI) handler(t *testing.T) http.Handler {
@@ -25,21 +24,14 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		})
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/robot/token", func(w http.ResponseWriter, r *http.Request) {
-		if f.tokenErr != "" {
-			write(w, 1, f.tokenErr, nil)
-			return
-		}
-		write(w, 0, "", map[string]any{"token": "RT1"})
-	})
 	mux.HandleFunc("/checkin", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		if r.Form.Get("token") == "RT1" { // robot 签到
+		if _, isSign := r.Form["touchstone_event"]; isSign { // APP 签到
 			if f.signErr != "" {
 				write(w, 1, f.signErr, nil)
 				return
 			}
-			write(w, 0, "签到成功", map[string]any{})
+			write(w, 0, "签到成功", f.profile)
 			return
 		}
 		// 档案读取
@@ -55,7 +47,7 @@ func fakeClient(t *testing.T, f *fakeAPI) *Client {
 	t.Helper()
 	srv := httptest.NewServer(f.handler(t))
 	t.Cleanup(srv.Close)
-	c, err := NewClient("sess=old-sess; smzdm_id=u1; device_id=d1", srv.URL)
+	c, err := NewClient("sess=old-sess; smzdm_id=u1; device_id=d1; device_smzdm=iphone; device_smzdm_version=11.1.92; v=11.1.92", srv.URL)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -66,8 +58,8 @@ var profileSample = map[string]any{
 	"daily_num": 264.0, "cgold": 569.0, "cpoints": 68169.0, "cexperience": 79736.0,
 }
 
-// robot 流程签到成功 + 档案展示。
-func TestPerformCheckinRobotSigns(t *testing.T) {
+// APP 原方签到成功，签到响应自带档案。
+func TestPerformCheckinAppSigns(t *testing.T) {
 	c := fakeClient(t, &fakeAPI{profile: profileSample})
 	msg, prof, err := PerformDailyCheckin(c)
 	if err != nil {
@@ -81,21 +73,21 @@ func TestPerformCheckinRobotSigns(t *testing.T) {
 	}
 }
 
-// robot 签到回"今日已签到"按成功处理。
+// 签到回"今日已签到"按成功处理，并展示档案。
 func TestPerformCheckinAlreadySigned(t *testing.T) {
 	c := fakeClient(t, &fakeAPI{profile: profileSample, signErr: "今日已签到，请勿重复签到"})
 	msg, _, err := PerformDailyCheckin(c)
 	if err != nil {
 		t.Fatalf("已签到不应报错：%v", err)
 	}
-	if !strings.Contains(msg, "今日已签到") {
+	if !strings.Contains(msg, "今日已签到") || !strings.Contains(msg, "连签第264天") {
 		t.Fatalf("文案不对：%s", msg)
 	}
 }
 
-// token 阶段失败（登录过期）必须暴露为失败。
-func TestPerformCheckinTokenFailure(t *testing.T) {
-	c := fakeClient(t, &fakeAPI{profile: profileSample, tokenErr: "登录已过期"})
+// 签到阶段失败（登录过期）必须暴露为失败。
+func TestPerformCheckinSignFailure(t *testing.T) {
+	c := fakeClient(t, &fakeAPI{profile: profileSample, signErr: "登录已过期"})
 	if _, _, err := PerformDailyCheckin(c); err == nil || !strings.Contains(err.Error(), "登录已过期") {
 		t.Fatalf("应暴露登录过期，got %v", err)
 	}

@@ -66,34 +66,28 @@ func FetchCheckinProfile(c *Client) (CheckinResult, error) {
 
 // PerformDailyCheckin 真正执行每日签到并返回（结果文案, 签到档案, 错误）。
 //
-// 签到走 robot 流程（/robot/token → /checkin，以其 error_msg 为准）；
-// 档案仅用于展示连签天数与金币余额。robot 在 token 阶段失败时直接
-// 报错（多为登录过期/风控，属真实失败，必须暴露）。
+// 签到走 hex-ci 验证的 APP 原方（安卓身份 + touchstone_event 字段）；
+// 签到响应自带档案字段（连签天数/金币余额），直接用于展示。
 func PerformDailyCheckin(c *Client) (string, CheckinResult, error) {
-	signErr := c.RobotSign()
+	data, signErr := c.AppSign()
 	if signErr == nil {
-		log.Printf("smzdm: robot 签到成功")
-	} else {
-		log.Printf("smzdm: robot 签到未成：%v", signErr)
-	}
-	prof, profErr := FetchCheckinProfile(c)
-	if profErr != nil {
-		log.Printf("smzdm: 签到档案拉取失败：%v", profErr)
-	}
-	switch {
-	case signErr == nil:
-		if profErr == nil {
-			return "签到成功 · " + prof.Summary(), prof, nil
+		log.Printf("smzdm: APP 签到成功")
+		prof := parseCheckinResult(data)
+		log.Printf("smzdm: 签到档案 %+v", prof)
+		if prof.ConsecutiveDays == 0 && prof.GoldEarned == 0 && prof.PointsEarned == 0 {
+			return "签到成功", prof, nil
 		}
-		return "签到成功", prof, nil
-	case IsAlreadySigned(signErr):
+		return "签到成功 · " + prof.Summary(), prof, nil
+	}
+	log.Printf("smzdm: APP 签到未成：%v", signErr)
+	if IsAlreadySigned(signErr) {
+		prof, profErr := FetchCheckinProfile(c)
 		if profErr == nil {
 			return "今日已签到 · " + prof.Summary(), prof, nil
 		}
-		return "今日已签到", prof, nil
-	default:
-		return "", prof, signErr
+		return "今日已签到", CheckinResult{}, nil
 	}
+	return "", CheckinResult{}, signErr
 }
 
 // IsAlreadySigned 服务端以业务错误表示"今日已签到"时识别为已签。
