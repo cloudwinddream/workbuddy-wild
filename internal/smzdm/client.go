@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -231,75 +232,81 @@ func (c *Client) doPost(path string, form url.Values, headers http.Header) (map[
 }
 
 // ---------------------------------------------------------------------------
-// APP 签到（hex-ci/smzdm_script 验证的真正签到原方）
+// APP 签到（2026-10-07 用户 Reqable 抓包当前 iPhone APP 11.1.95 的真实请求）
 //
-// 实测教训：新版协议（token=sess+SK / iPhone）与 robot 流程的
-// POST /checkin 都只返回账号档案、并不真正签到（金币余额多日
-// 不变、APP 里仍可再签）。hex-ci（2026 仍在维护）的原方是：
-// Cookie 强制改成安卓身份（v10.4.26），签到表单额外带
-// touchstone_event 与 captcha 字段，成败看 error_code。
+// 实测教训：gen3（token+SK）、robot 流程、hex-ci 原方（touchstone_event
+// + 强制安卓身份）回的都是"假成功"——error_code 0 但 APP 里仍可再签，
+// 次日 APP 还会推送签到提醒。真实 APP 的签到请求是：
+//   POST /checkin
+//   basic_v=0&f=iphone&v=11.1.95&weixin=1&time=<毫秒>&zhuanzai_ab=d&sign=<MD5>
+// 即：不带 token / sk / touchstone_event / captcha，Cookie 原样发送
+// （iPhone 身份），签名覆盖 6 个字段。zhuanzai_ab 疑似签到页的 A/B
+// 分桶标识（抓包值为 d），可用 SMZDM_ZHUANZAI_AB 覆盖。
 // ---------------------------------------------------------------------------
 
-const (
-	appSignVersion     = "10.4.26"
-	appSignVersionCode = "866"
-	appSignUA          = "smzdm_android_V10.4.26 rv:866 (Redmi Note 3;Android10.0;zh)smzdmapp"
-)
-
-var appSignProfile = AppProfile{Version: appSignVersion, VersionCode: appSignVersionCode, SignKey: "apr1$AwP!wRRT$gJ/q.X24poeBInlUJC", SKKey: "geZm53XAspb02exN"}
-
-// androidifyCookie 把 Cookie 改成安卓身份（对齐 hex-ci 的处理：
-// 平台与版本字段统一改写为 android / 10.4.26，只改已存在的键）。
-func androidifyCookie(raw string) string {
-	s := strings.Replace(raw, "iphone", "android", 1)
-	s = strings.Replace(s, "iPhone", "Android", 1)
-	for k, v := range map[string]string{
-		"smzdm_version":             appSignVersion,
-		"device_smzdm_version":      appSignVersion,
-		"v":                         appSignVersion,
-		"device_smzdm_version_code": appSignVersionCode,
-		"device_system_version":     "10.0",
-		"device_type":               "Android",
-		"device_smzdm":              "android",
-		"device_name":               "Android",
-	} {
-		re := regexp.MustCompile(`(^|;\s*)` + k + `=[^;]*`)
-		s = re.ReplaceAllString(s, "${1}"+k+"="+v)
-	}
-	return s
-}
-
 func (c *Client) appSignHeaders() http.Header {
+	rv := c.cookies["device_smzdm_version_code"]
+	if rv == "" {
+		if c.version == "11.1.95" {
+			rv = "173" // 2026-10-07 抓包：11.1.95 的 rv 以 173 开头
+		} else {
+			rv = c.profile.VersionCode
+		}
+	}
 	h := http.Header{}
-	h.Set("User-Agent", appSignUA)
+	h.Set("User-Agent", fmt.Sprintf("smzdm %s rv:%s", c.version, rv))
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
 	h.Set("Accept", "*/*")
 	h.Set("Accept-Language", "zh-Hans-CN;q=1")
-	h.Set("Cookie", androidifyCookie(c.cookie))
+	h.Set("Cookie", c.cookie)
 	h.Set("request_key", fmt.Sprintf("%018d", rand.Int63n(1e18)))
 	return h
 }
 
+func zhuanzaiAB() string {
+	if v := strings.TrimSpace(os.Getenv("SMZDM_ZHUANZAI_AB")); v != "" {
+		return v
+	}
+	return "d"
+}
+
 // AppSign 执行真正的每日签到，返回签到响应 data（内含档案字段）。
-// 服务端以业务错误表示"今日已签到"时返回 APIError（IsAlreadySigned 识别）。
+// 对齐 APP 行为：先调 show_view_v2 拉签到页（best-effort），再调
+// /checkin 签到。服务端以业务错误表示"今日已签到"时返回 APIError
+// （IsAlreadySigned 识别）。
 func (c *Client) AppSign() (map[string]any, error) {
-	sk := "1" // hex-ci 原方：算不出 SK 时就发 "1"
-	if g, err := GenerateSecurityKey(c.smzdmID, c.deviceID, appSignProfile); err == nil {
-		sk = g
+	prefetch := map[string]string{
+		"basic_v":     "0",
+		"f":           signPlatform(c),
+		"v":           c.version,
+		"weixin":      "1",
+		"time":        fmt.Sprintf("%d000", time.Now().Unix()),
+		"zhuanzai_ab": zhuanzaiAB(),
 	}
+	prefetch["sign"] = ComputeRequestSignature(prefetch, c.profile)
+	// 预取失败不影响签到（纯读页面）。
+	_, _ = c.doPost("/checkin/show_view_v2", formOf(prefetch), c.appSignHeaders())
+
 	fields := map[string]string{
-		"weixin":           "1",
-		"basic_v":          "0",
-		"f":                "android",
-		"v":                appSignVersion,
-		"time":             fmt.Sprintf("%d000", time.Now().Unix()),
-		"touchstone_event": "",
-		"sk":               sk,
-		"token":            c.cookies["sess"],
-		"captcha":          "",
+		"basic_v":     "0",
+		"f":           signPlatform(c),
+		"v":           c.version,
+		"weixin":      "1",
+		"time":        fmt.Sprintf("%d000", time.Now().Unix()),
+		"zhuanzai_ab": zhuanzaiAB(),
 	}
-	fields["sign"] = ComputeRequestSignature(fields, appSignProfile)
+	fields["sign"] = ComputeRequestSignature(fields, c.profile)
 	return c.doPost("/checkin", formOf(fields), c.appSignHeaders())
+}
+
+func signPlatform(c *Client) string {
+	if f := c.cookies["f"]; f != "" {
+		return f
+	}
+	if c.platform != "" {
+		return c.platform
+	}
+	return "iphone"
 }
 
 func formOf(fields map[string]string) url.Values {

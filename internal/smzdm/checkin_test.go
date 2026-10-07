@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// fakeAPI 模拟 smzdm 接口：/checkin 按是否带 touchstone_event 字段
+// fakeAPI 模拟 smzdm 接口：/checkin 按是否带 zhuanzai_ab 字段
 // 区分 APP 签到与档案读取。
 type fakeAPI struct {
 	profile map[string]any
@@ -24,9 +24,23 @@ func (f *fakeAPI) handler(t *testing.T) http.Handler {
 		})
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/checkin/show_view_v2", func(w http.ResponseWriter, r *http.Request) {
+		write(w, 0, "", map[string]any{"rows": []any{}})
+	})
 	mux.HandleFunc("/checkin", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		if _, isSign := r.Form["touchstone_event"]; isSign { // APP 签到
+		// 签到用 APP 原生 UA（"smzdm 11.1.95 rv:173"），档案读取用旧 UA：
+		// 两者字段相同，靠 UA 区分，记录我们押注的差异点。
+		if strings.HasPrefix(r.UserAgent(), "smzdm ") { // APP 签到（抓包原方）
+			// 抓包原方：签到请求不带 token/sk/touchstone_event/captcha
+			for _, k := range []string{"token", "sk", "touchstone_event", "captcha"} {
+				if _, ok := r.Form[k]; ok {
+					t.Errorf("签到请求不应带字段 %s", k)
+				}
+			}
+			if _, ok := r.Form["zhuanzai_ab"]; !ok {
+				t.Errorf("签到请求应带 zhuanzai_ab 字段")
+			}
 			if f.signErr != "" {
 				write(w, 1, f.signErr, nil)
 				return
