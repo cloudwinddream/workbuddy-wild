@@ -32,12 +32,25 @@ func (s *Service) Login(username, password string) (*Challenge, error) {
 	}
 	log.Printf("wnflb: 开始登录 username=%s", username)
 
-	_, formhash, loginhash, err := s.fetchLoginPage()
+	html, formhash, loginhash, err := s.fetchLoginPage()
 	if err != nil {
 		return nil, fmt.Errorf("获取登录页失败: %w", err)
 	}
 	if formhash == "" || loginhash == "" {
 		return nil, fmt.Errorf("无法解析登录页（formhash/loginhash 缺失），论坛可能改版")
+	}
+
+	// 登录页自带验证码（论坛开启登录验证码）：必须先过验证码再提交
+	// 账号密码，裸提交会被论坛以"验证码错误"直接拒掉。挑战的 Auth
+	// 为空，表示走"带验证码的完整登录提交"分支（见 SubmitCaptcha）。
+	if ci := detectCaptcha(html); ci.Idhash != "" {
+		log.Printf("wnflb: 登录页带验证码，先走验证码流程")
+		return s.registerChallenge(&Challenge{
+			Formhash:    formhash,
+			Loginhash:   loginhash,
+			Idhash:      ci.Idhash,
+			SeccodeHash: ci.SeccodeHash,
+		}), ErrCaptchaRequired
 	}
 
 	// 首次提交：不带验证码（已信任 IP 通常直接成功）。
@@ -168,6 +181,26 @@ func (s *Service) submitChallenge(ch *Challenge, code string) (string, error) {
 	return s.client.postForm(loginURL, form, map[string]string{"Referer": s.loginPageURL()})
 }
 
+// submitLoginWithCaptcha 登录页自带验证码时的完整登录提交：
+// 账号密码 + 验证码字段一次提交（对齐浏览器登录表单）。
+func (s *Service) submitLoginWithCaptcha(ch *Challenge, username, password, code string) (string, error) {
+	form := url.Values{
+		"formhash":      {ch.Formhash},
+		"referer":       {s.baseURL + "/"},
+		"loginfield":    {"username"},
+		"username":      {username},
+		"password":      {password},
+		"questionid":    {"0"},
+		"answer":        {""},
+		"cookietime":    {"2592000"},
+		"seccodehash":   {ch.SeccodeHash},
+		"seccodemodid":  {"member::logging"},
+		"seccodeverify": {code},
+	}
+	loginURL := s.baseURL + "/member.php?mod=logging&action=login&loginsubmit=yes&loginhash=" + ch.Loginhash
+	return s.client.postForm(loginURL, form, map[string]string{"Referer": s.loginPageURL()})
+}
+
 // checkLoginResult 按上游逻辑判定登录 POST 是否成功：先看响应消息，
 // 再以首页 discuz_uid 为权威校验。返回 (msg, ok)。
 func checkLoginResult(s *Service, respHTML string) (string, bool) {
@@ -259,9 +292,34 @@ func (s *Service) SubmitCaptcha(id, code string, username, password string) (*Ch
 		log.Printf("wnflb: 验证码校验未通过，换图重试")
 		return s.registerChallenge(ch), ErrCaptchaRetry
 	}
-	respHTML, err := s.submitChallenge(ch, code)
+	// 两种挑战分流：Auth 非空是密码提交后下发的二次挑战（只交验证码）；
+	// Auth 为空是登录页自带验证码（账号密码与验证码一次提交）。
+	var respHTML string
+	var err error
+	if ch.Auth != "" {
+		respHTML, err = s.submitChallenge(ch, code)
+	} else {
+		respHTML, err = s.submitLoginWithCaptcha(ch, username, password, code)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("提交登录失败: %w", err)
+	}
+	if ch.Auth == "" {
+		// 完整提交后仍可能下发二次挑战，交给前端再过一次验证码。
+		if nch := detectChallenge(respHTML); nch != nil {
+			log.Printf("wnflb: 登录提交后触发二次验证码挑战")
+			return s.registerChallenge(nch), ErrCaptchaRequired
+		}
+		// 验证码错误时论坛可能重渲染登录页（新 idhash），换图重试。
+		if strings.Contains(respHTML, `name="password"`) {
+			if ci := detectCaptcha(respHTML); ci.Idhash != "" {
+				fh, lh := extractLoginFields(respHTML)
+				return s.registerChallenge(&Challenge{
+					Formhash: fh, Loginhash: lh,
+					Idhash: ci.Idhash, SeccodeHash: ci.SeccodeHash,
+				}), ErrCaptchaRetry
+			}
+		}
 	}
 	// 仍被要求验证码 → 验证码不正确，换图重试
 	if strings.Contains(respHTML, "请输入验证码") && strings.Contains(respHTML, "auth=") {
@@ -273,6 +331,11 @@ func (s *Service) SubmitCaptcha(id, code string, username, password string) (*Ch
 		delete(s.challenges, id)
 		return nil, nil
 	} else if msg != "" {
+		// 完整登录提交的验证码错误消息 → 换图重试，不当作登录失败。
+		if ch.Auth == "" && strings.Contains(msg, "验证码") {
+			log.Printf("wnflb: 验证码错误，换图重试")
+			return s.registerChallenge(ch), ErrCaptchaRetry
+		}
 		return nil, fmt.Errorf("%s", msg)
 	}
 	return nil, fmt.Errorf("登录失败（未进入登录态）")

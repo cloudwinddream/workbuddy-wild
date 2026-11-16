@@ -106,6 +106,14 @@ func (a *API) handleWnflbSubmitCaptcha(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 完整登录提交后又下发二次挑战：同样让前端换图再过一次。
+	if errors.Is(err, wnflb.ErrCaptchaRequired) && ch != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "need_retry": true, "captcha_id": ch.ID,
+			"msg": "还需要再过一次验证码，已换新图，请识别并提交",
+		})
+		return
+	}
 	log.Printf("webapi wnflb 验证码提交失败: %v", err)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
 }

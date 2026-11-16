@@ -181,12 +181,15 @@ func (s *Service) EnsureLoggedIn() error {
 	}
 	// 内联登录流程（避免与 s.Login 的锁重入）
 	log.Printf("wnflb: Cookie 失效，用存档账号自动登录 username=%s", acc.Username)
-	_, formhash, loginhash, err := s.fetchLoginPage()
+	html, formhash, loginhash, err := s.fetchLoginPage()
 	if err != nil {
 		return fmt.Errorf("获取登录页失败: %w", err)
 	}
 	if formhash == "" || loginhash == "" {
 		return fmt.Errorf("无法解析登录页")
+	}
+	if ci := detectCaptcha(html); ci.Idhash != "" {
+		return fmt.Errorf("%w：登录页需要验证码，请在网页手动登录一次", ErrCaptchaRequired)
 	}
 	respHTML, err := s.submitLogin(formhash, loginhash, acc.Username, acc.Password)
 	if err != nil {
