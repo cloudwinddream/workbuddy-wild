@@ -18,6 +18,7 @@ func (a *API) wnflbSvc() *wnflb.Service { return a.wnflb }
 
 func (a *API) registerWnflb(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/wnflb/login", a.withAuth(a.handleWnflbLogin))
+	mux.HandleFunc("POST /api/wnflb/cookie", a.withAuth(a.handleWnflbCookie))
 	mux.HandleFunc("GET /api/wnflb/captcha", a.withAuth(a.handleWnflbCaptcha))
 	mux.HandleFunc("POST /api/wnflb/captcha", a.withAuth(a.handleWnflbSubmitCaptcha))
 	mux.HandleFunc("POST /api/wnflb/logout", a.withAuth(a.handleWnflbLogout))
@@ -53,6 +54,30 @@ func (a *API) handleWnflbLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("webapi wnflb 登录失败: %v", err)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
+}
+
+// POST /api/wnflb/cookie {cookie}
+// 用浏览器复制的 Cookie 直接登录（绕开账号密码与验证码）。
+// → {ok:true} | {ok:false, msg}
+func (a *API) handleWnflbCookie(w http.ResponseWriter, r *http.Request) {
+	svc := a.wnflbSvc()
+	if svc == nil {
+		writeErr(w, http.StatusServiceUnavailable, "福利吧签到模块未启用")
+		return
+	}
+	var req struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if err := svc.ImportCookie(strings.TrimSpace(req.Cookie)); err != nil {
+		log.Printf("webapi wnflb Cookie 导入失败: %v", err)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "msg": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msg": "Cookie 登录成功"})
 }
 
 // GET /api/wnflb/captcha?id= → 验证码图片。

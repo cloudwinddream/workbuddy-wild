@@ -99,6 +99,21 @@ func (c *Client) clearCookies() {
 	_ = os.Remove(c.cookieFile)
 }
 
+// setCookiePairs 用外部粘贴的 Cookie 整体替换当前 jar 并落盘
+// （Cookie 登录导入用：先清掉旧会话，避免新旧混杂）。
+func (c *Client) setCookiePairs(pairs map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	jar, _ := cookiejar.New(nil)
+	cookies := make([]*http.Cookie, 0, len(pairs))
+	for name, value := range pairs {
+		cookies = append(cookies, &http.Cookie{Name: name, Value: value})
+	}
+	jar.SetCookies(c.baseURL(), cookies)
+	c.http.Jar = jar
+	c.saveCookies()
+}
+
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	for k, v := range defaultHeaders {
 		if req.Header.Get(k) == "" {

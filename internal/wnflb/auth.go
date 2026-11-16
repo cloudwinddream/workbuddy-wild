@@ -18,6 +18,46 @@ func newChallengeID() string {
 	return hex.EncodeToString(b)
 }
 
+// ImportCookie 用浏览器复制的 Cookie 直接登录（绕开账号密码与验证码）。
+// 校验标准：Cookie 里须有 Discuz 的 *_auth 登录票据，且导入后首页
+// 能确认登录态；不满足则清掉导入内容并报错。Cookie 一般 30 天过期，
+// 过期后重新粘贴一次即可；存档账号密码保留，仍可改走密码登录。
+func (s *Service) ImportCookie(raw string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pairs := map[string]string{}
+	hasAuth := false
+	for _, part := range strings.Split(raw, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		pairs[name] = strings.TrimSpace(value)
+		if strings.HasSuffix(name, "_auth") {
+			hasAuth = true
+		}
+	}
+	if len(pairs) == 0 {
+		return fmt.Errorf("未解析出任何 Cookie，请粘贴完整的 Cookie 字符串")
+	}
+	if !hasAuth {
+		return fmt.Errorf("Cookie 里没找到登录票据（*_auth），请在浏览器登录论坛后复制完整 Cookie")
+	}
+	s.client.setCookiePairs(pairs)
+	if logged, _ := s.checkLoggedIn(); !logged {
+		s.client.clearCookies()
+		return fmt.Errorf("Cookie 无效或已过期，请重新从浏览器复制")
+	}
+	log.Printf("wnflb: Cookie 导入成功，已登录")
+	return nil
+}
+
 // Login 用账号密码登录。
 //   - 成功：返回 (nil, nil)，Cookie 已落盘；
 //   - 触发验证码挑战：返回 (challenge, ErrCaptchaRequired)，调用方展示
@@ -37,6 +77,11 @@ func (s *Service) Login(username, password string) (*Challenge, error) {
 		return nil, fmt.Errorf("获取登录页失败: %w", err)
 	}
 	if formhash == "" || loginhash == "" {
+		// 已登录时 Discuz 不再给登录表单（返回提示页/首页），别误报改版。
+		if logged, _ := s.checkLoggedIn(); logged {
+			log.Printf("wnflb: 已是登录状态，无需重复登录")
+			return nil, nil
+		}
 		return nil, fmt.Errorf("无法解析登录页（formhash/loginhash 缺失），论坛可能改版")
 	}
 

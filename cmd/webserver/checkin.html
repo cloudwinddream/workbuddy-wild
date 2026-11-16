@@ -622,7 +622,12 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
         '<div class="hint">本次登录需要验证码（点击图片可换一张）：</div>' +
         '<img class="captchaImg" id="wnflbCaptchaImg" alt="验证码">' +
         '<input class="input" type="text" id="wnflbCaptchaCode" placeholder="输入验证码" autocomplete="off">' +
-        '<div class="row"><button class="btn primary" data-mact="captcha">提交验证码</button></div></div></div>';
+        '<div class="row"><button class="btn primary" data-mact="captcha">提交验证码</button></div></div>' +
+        '<div class="f-title" style="margin-top:14px">或用 Cookie 登录（免验证码）</div>' +
+        '<div class="hint" style="margin-top:0">在电脑浏览器登录论坛后，F12 → 网络 → 点 forum.php 请求 → 复制请求头里的整行 Cookie 粘贴到下方（须包含 _auth）。约 30 天过期，过期后重新粘贴一次。</div>' +
+        '<textarea class="input" id="wnflbCookie" rows="3" style="font-family:var(--mono);font-size:13px;margin-top:6px" ' +
+        'placeholder="xxxx_2132_auth=...; xxxx_2132_saltkey=...; ..."></textarea>' +
+        '<div class="row"><button class="btn" data-mact="wnflb-cookie">用 Cookie 登录</button></div></div>';
     }
     // 什么值得买 Cookie 表单（未配置时展开）
     if (m.id === "smzdm" && !m.logged_in) {
@@ -721,6 +726,15 @@ label.f-label { display: block; font-size: 13.5px; color: var(--muted); margin: 
         toast("已退出福利吧登录");
         loadModules();
       } catch (e) { if (e.message !== "401") setMsg(msgEl, "退出失败：" + e.message, false); }
+    } else if (act === "wnflb-cookie") {
+      var ck2 = $("wnflbCookie").value.trim();
+      if (!ck2) { setMsg(msgEl, "请先粘贴 Cookie", false); return; }
+      setMsg(msgEl, "验证 Cookie 中…");
+      try {
+        var r5 = await api("POST", "/api/wnflb/cookie", { cookie: ck2 });
+        if (r5.ok) { toast("福利吧 Cookie 登录成功"); loadModules(); return; }
+        setMsg(msgEl, msgOf(r5, "Cookie 无效"), false);
+      } catch (e) { if (e.message !== "401") setMsg(msgEl, "Cookie 登录失败：" + e.message, false); }
     } else if (act === "smzdm-save") {
       var ck = $("smzdmCookie").value.trim();
       if (!ck) { setMsg(msgEl, "请粘贴 Cookie", false); return; }

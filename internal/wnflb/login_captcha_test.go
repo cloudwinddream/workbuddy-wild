@@ -28,7 +28,7 @@ func (f *fakeDiscuz) handler() http.Handler {
 			}
 			f.loginPosts = append(f.loginPosts, rec)
 			if rec["seccodeverify"] == "1234" && rec["username"] == "alice" {
-				http.SetCookie(w, &http.Cookie{Name: "test_auth", Value: "1", Path: "/"})
+				http.SetCookie(w, &http.Cookie{Name: "pfx_2132_auth", Value: "1", Path: "/"})
 				_, _ = w.Write([]byte(`<?xml version="1.0"?><root><![CDATA[欢迎您回来，alice]]></root>`))
 				return
 			}
@@ -58,7 +58,7 @@ func (f *fakeDiscuz) handler() http.Handler {
 	})
 	mux.HandleFunc("/forum.php", func(w http.ResponseWriter, r *http.Request) {
 		uid := "0"
-		if c, err := r.Cookie("test_auth"); err == nil && c.Value == "1" {
+		if c, err := r.Cookie("pfx_2132_auth"); err == nil && c.Value == "1" {
 			uid = "94140"
 		}
 		_, _ = w.Write([]byte(`<script>var discuz_uid = '` + uid + `';</script>`))
@@ -114,6 +114,29 @@ func TestLoginWithPageCaptcha(t *testing.T) {
 	}
 	if acc, ok := svc.loadAccount(); !ok || acc.Username != "alice" {
 		t.Fatal("登录成功应保存账号")
+	}
+}
+
+// Cookie 导入：含 *_auth 且有效的直接登录；缺票据/无效的报错。
+func TestImportCookie(t *testing.T) {
+	f := &fakeDiscuz{}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	svc := New(t.TempDir(), srv.URL)
+
+	if err := svc.ImportCookie("pfx_2132_saltkey=xyz; other=1"); err == nil ||
+		!strings.Contains(err.Error(), "_auth") {
+		t.Fatalf("缺 *_auth 应报错，got %v", err)
+	}
+	if err := svc.ImportCookie("pfx_2132_auth=wrong; pfx_2132_saltkey=xyz"); err == nil ||
+		!strings.Contains(err.Error(), "无效或已过期") {
+		t.Fatalf("无效 Cookie 应报错，got %v", err)
+	}
+	if err := svc.ImportCookie("pfx_2132_auth=1; pfx_2132_saltkey=xyz"); err != nil {
+		t.Fatalf("有效 Cookie 应导入成功，got %v", err)
+	}
+	if logged, _ := svc.checkLoggedIn(); !logged {
+		t.Fatal("导入后应处于登录态")
 	}
 }
 
